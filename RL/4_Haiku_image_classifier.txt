@@ -1,0 +1,884 @@
+{
+  "nbformat": 4,
+  "nbformat_minor": 0,
+  "metadata": {
+    "colab": {
+      "provenance": []
+    },
+    "kernelspec": {
+      "name": "python3",
+      "display_name": "Python 3"
+    },
+    "language_info": {
+      "name": "python"
+    }
+  },
+  "cells": [
+    {
+      "cell_type": "markdown",
+      "source": [
+        "# Going further with Haiku (and optax)\n",
+        "\n",
+        "In this bonus exercise, you will learn how to build an image classifier with Haiku. We will also introduce a new library, optax, which implements several gradient optimizers for jax.\n",
+        "\n",
+        "## Set up"
+      ],
+      "metadata": {
+        "id": "9-rr1idWboom"
+      }
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "id": "0WR3ei1Zbi0f",
+        "cellView": "form"
+      },
+      "outputs": [],
+      "source": [
+        "#@title Installations  { form-width: \"30%\" }\n",
+        "\n",
+        "%pip install git+https://github.com/deepmind/acme.git#egg=dm-acme[jax,tf,envs]\n",
+        "\n",
+        "from IPython.display import clear_output\n",
+        "clear_output()"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "#@title Imports  { form-width: \"30%\" }\n",
+        "from typing import *\n",
+        "import haiku as hk\n",
+        "import jax\n",
+        "import jax.numpy as jnp\n",
+        "import chex\n",
+        "import matplotlib.pyplot as plt\n",
+        "import numpy as np\n",
+        "import optax\n",
+        "import tensorflow_datasets as tfds\n",
+        "import tensorflow as tf\n",
+        "from dataclasses import dataclass\n",
+        "%matplotlib inline"
+      ],
+      "metadata": {
+        "id": "99I9Q78ybz_n",
+        "cellView": "form"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "## The MNIST dataset\n",
+        "\n",
+        "The [MNIST database](http://yann.lecun.com/exdb/mnist/) consists in 60,000 training and 10,000 testing samples of handwritten digits. It is both one of the oldest and easiest computer vision datasets.\n",
+        "\n",
+        "MNIST is available in [tensorflow datasets](https://www.tensorflow.org/datasets/catalog/mnist), you can load it as follow:"
+      ],
+      "metadata": {
+        "id": "wTNHh_kdb2RV"
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "ds_train, info = tfds.load('mnist', split='train', with_info=True)\n",
+        "\n",
+        "# Shows some samples of the dataset\n",
+        "tfds.show_examples(ds_train, info)"
+      ],
+      "metadata": {
+        "id": "jJnbuCwG4k09"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "Let's have a closer look at a sample of this dataset:"
+      ],
+      "metadata": {
+        "id": "Pmqql3kk7Hph"
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "sample = next(iter(ds_train))\n",
+        "print(sample)"
+      ],
+      "metadata": {
+        "id": "yJV5k88i5ARK"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "As you can see, each sample is a dictionary with two fields `image` and `label`. Let's have a closer look:"
+      ],
+      "metadata": {
+        "id": "05bYuUQC7xAy"
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "print('\"image\" field:')\n",
+        "print(f\"type: f{type(sample['image'])}\")\n",
+        "print(f\"shape : {sample['image'].shape}\")\n",
+        "print()\n",
+        "print(f\"min value : {tf.math.reduce_min(sample['image'])}\")\n",
+        "print(f\"max value : {tf.math.reduce_max(sample['image'])}\")\n",
+        "print()\n",
+        "print('\"label\" field:')\n",
+        "print(sample[\"label\"])"
+      ],
+      "metadata": {
+        "id": "266cDF6d7nx-"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "## Exercice 1: The dataset\n",
+        "\n",
+        "We are not going to use this dataset directly: first we need to transform it a bit so it fits our purpose. To do so, define a function, `load_and_prepare_dataset` which:\n",
+        "- loads mnist from tfds\n",
+        "- normalize each image so that its values are floating numbers $[0; 1]$ (and not unit8)\n",
+        "- each element of the dataset is not a dictionary but a tuple of tensors: `data`, `label`\n",
+        "- shuffle the dataset if we are loading the training data (see the method [`shuffle`](https://www.tensorflow.org/api_docs/python/tf/data/Dataset#shuffle) and don't forget to set the argument `reshuffle_each_iteration`).\n",
+        "- group the data samples into batches of size `batch_size` where `batch_size` is given as an argument to the function. See the [`batch`](https://www.tensorflow.org/api_docs/python/tf/data/Dataset#batch) method.\n",
+        "\n",
+        "To do so, use the function [map](https://www.tensorflow.org/api_docs/python/tf/data/Dataset#map) which applies a function to a dataset. You will find below a few examples of how `map` can be used."
+      ],
+      "metadata": {
+        "id": "pMfCyvoisYnB"
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "#@title `map` function  { form-width: \"30%\" }\n",
+        "\n",
+        "# Load the dataset\n",
+        "sample_ds = tfds.load('mnist', split='train')\n",
+        "\n",
+        "# Extract only the image field\n",
+        "image_only_ds = sample_ds.map(lambda x : x['image'])\n",
+        "print(\"Field extraction\")\n",
+        "print(f\"type of a sample of the original dataset : {type(next(iter(sample_ds)))}\")\n",
+        "print(f\"type of a sample of the image only dataset : {type(next(iter(image_only_ds)))}\")\n",
+        "print()\n",
+        "\n",
+        "# Change the labels into one hot tensor\n",
+        "print(\"To one hot:\")\n",
+        "one_hot_labels = sample_ds.map(lambda x : {'image': x['image'], 'label': tf.one_hot(x['label'], 10)})\n",
+        "print(f\"Original label: {next(iter(sample_ds))['label']}\")\n",
+        "print(f\"New label: {next(iter(one_hot_labels))['label']}\")"
+      ],
+      "metadata": {
+        "id": "7Hm1RsZ0t3GA"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "Now, write your own function."
+      ],
+      "metadata": {
+        "id": "O2-Vt66za4QU"
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "def load_and_prepare_dataset(dataset_split : str, batch_size: int) -> tf.data.Dataset:\n",
+        "  \"\"\"Loads the MNIST dataset and applies it the following operations:\n",
+        "    - normalize each image so that its values are floats in [0, 1]\n",
+        "    - each sample of the new dataset should be a tuple (`image`, `label`)\n",
+        "    - in train mode, reshuffle the dataset each time a new iterator is called\n",
+        "    - group the samples into batches of batch_size\n",
+        "\n",
+        "  Args:\n",
+        "    dataset_split: either `train` or `test`\n",
+        "  Returns:\n",
+        "    The transformed MNIST dataset\n",
+        "  Raises:\n",
+        "    This function should raise a ValueError if dataset_split is neither train\n",
+        "    or test\n",
+        "  \"\"\"\n",
+        "\n",
+        "  # Your code here\n",
+        "  return ..."
+      ],
+      "metadata": {
+        "id": "JIcnqfzCa64p"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "You can test your data loader with the following cell:"
+      ],
+      "metadata": {
+        "id": "_YovxjuofYiO"
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "#@title Testing the data loader  { form-width: \"30%\" }\n",
+        "print(\"Testing the training dataset\")\n",
+        "batch_size = 3\n",
+        "train_dataset = load_and_prepare_dataset('train', batch_size)\n",
+        "train_iterator = train_dataset.as_numpy_iterator()\n",
+        "\n",
+        "x0, y0 = next(train_iterator)\n",
+        "if x0.shape != (batch_size, 28, 28, 1):\n",
+        "  raise ValueError(\"Invalid image shape\")\n",
+        "if y0.shape != (batch_size,):\n",
+        "  raise ValueError(\"Invalid label shape\")\n",
+        "if x0.dtype != np.float32:\n",
+        "  raise ValueError(\"Invalid image type\")\n",
+        "if x0.min() < 0:\n",
+        "  raise ValueError(\"Invalid image minimum\")\n",
+        "if x0.max() > 1:\n",
+        "  raise ValueError(\"Invalid image maximum\")\n",
+        "\n",
+        "is_valid = False\n",
+        "for _ in range(3):\n",
+        "  x, y = next(train_dataset.as_numpy_iterator())\n",
+        "  if np.any(y != y0):\n",
+        "    is_valid = True\n",
+        "    break\n",
+        "if not is_valid:\n",
+        "  raise ValueError(\"The training dataset is not reshuffled at each iteration\")\n",
+        "print(\"Correct !\\n\")\n",
+        "\n",
+        "print(\"Testing the validation dataset\")\n",
+        "valid_dataset = load_and_prepare_dataset('test', batch_size)\n",
+        "valid_iterator = valid_dataset.as_numpy_iterator()\n",
+        "x0, y0 = next(valid_iterator)\n",
+        "if x0.shape != (batch_size, 28, 28, 1):\n",
+        "  raise ValueError(\"Invalid image shape\")\n",
+        "if y0.shape != (batch_size,):\n",
+        "  raise ValueError(\"Invalid label shape\")\n",
+        "if x0.dtype != np.float32:\n",
+        "  raise ValueError(\"Invalid image type\")\n",
+        "if x0.min() < 0:\n",
+        "  raise ValueError(\"Invalid image minimum\")\n",
+        "if x0.max() > 1:\n",
+        "  raise ValueError(\"Invalid image maximum\")\n",
+        "\n",
+        "is_valid = True\n",
+        "for _ in range(3):\n",
+        "  x, y = next(valid_dataset.as_numpy_iterator())\n",
+        "  if np.any(y != y0):\n",
+        "    is_valid = False\n",
+        "    break\n",
+        "if not is_valid:\n",
+        "  raise ValueError(\"The validation dataset is reshuffled at each iteration\")\n",
+        "print(\"Correct !\\n\")"
+      ],
+      "metadata": {
+        "cellView": "form",
+        "id": "xxCR9F_mhBPv"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "It might seem a little weird to shuffle the dataset before iterating on it. It is because with tensorflow datasets, the tensorflow functions that are called before we build the iterator are actually exacuted once the iterator is called.\n",
+        "\n",
+        "From now on, you can call a new iterator on either your train or your test dataset by using the method `as_numpy_iterator`. For example, give a try to the following cell:"
+      ],
+      "metadata": {
+        "id": "G7YAKM7edeZ-"
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "batch_size = 8\n",
+        "ds_train = load_and_prepare_dataset('train', batch_size)\n",
+        "ds_val = load_and_prepare_dataset('test', batch_size)\n",
+        "\n",
+        "for name, ds in zip(['train', 'val'], [ds_train, ds_val]):\n",
+        "  n_batches = 0\n",
+        "  n_items = 0\n",
+        "  iterator = ds.as_numpy_iterator()\n",
+        "  for data, label in iterator:\n",
+        "    n_batches +=1\n",
+        "    n_items += data.shape[0]\n",
+        "  print(f\"Dataset {name}, {n_batches} batches, {n_items} items.\")"
+      ],
+      "metadata": {
+        "id": "NGbadLvDkG8B"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "And we are now done with tensorflow function. For the model and the actual ML part, we will only rely on jax and haiku."
+      ],
+      "metadata": {
+        "id": "x0hdktb9k03m"
+      }
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "## Exercice 2: Define your model\n",
+        "\n",
+        "MNIST can be solved by a very simple convolutional network. Remember, contrary to pytorch, with jax and haiku neural network **are not objects but functions**. Build a network function, `my_net`, which applies to a tensor `x` of shape `(B, W, H, 1)` the following transformations:\n",
+        "- a 2D convolution of kernel size 4, stride 1 and output dimension 4.\n",
+        "- a RelU activation\n",
+        "- a 2D convolution of kernel size 4, stride 1 and output dimension 4.\n",
+        "- a RelU activation\n",
+        "- a MaxPooling layer of kernel size 2 and stride 2\n",
+        "- a classification layer (eg a linear layer) which takes as input a tensor of shape `(B, C)` and outputs a tensor of shape `(B, C_out)` where `C_out` is the number of classes of the MNIST dataset and `C=h*w*c` where `(h, w, c)` are respectively the heigh, the width and the number of channel of the output of the max pooling layer.\n",
+        "\n",
+        "Have a look at [Haiku's documentation](https://dm-haiku.readthedocs.io/en/latest/api.html#haiku.Conv2D) and the [`jax.nn` package](https://jax.readthedocs.io/en/latest/jax.nn.html) to find your transforms."
+      ],
+      "metadata": {
+        "id": "bSgsVh7qk_PH"
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "def my_net(x : chex.Array) -> chex.Array:\n",
+        "  \"\"\"The function defining your neural network.\n",
+        "\n",
+        "  Args:\n",
+        "    x: input tensor. Should have the following shape (Batch, Width, Height, 1).\n",
+        "  Returns:\n",
+        "    Output score tensor of shape (batch_size, C_out) where C_out is the number\n",
+        "    of classes of the MNIST dataset.\n",
+        "  \"\"\"\n",
+        "  # Your code here\n",
+        "  return ..."
+      ],
+      "metadata": {
+        "id": "5zxmyL3gw334"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "Then initialize your model using a sample of your training data:"
+      ],
+      "metadata": {
+        "id": "RxoNEkTGyccr"
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "batch_size = 8\n",
+        "train_ds = load_and_prepare_dataset('train', batch_size)\n",
+        "train_sample, train_label = next(train_ds.as_numpy_iterator())\n",
+        "\n",
+        "# Initialize your network here\n",
+        "# Your code here\n",
+        "...\n",
+        "network_params = ..."
+      ],
+      "metadata": {
+        "id": "bZDY_kpoy8ni"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "#@title Testing your parameters { form-width: \"30%\" }\n",
+        "if len(network_params) != 3:\n",
+        "  raise ValueError(\"Exactly 3 layers of your network should have parameters\")\n",
+        "checked = {'conv1' : False, 'conv2': False, 'linear': False}\n",
+        "for param_layer in network_params.values():\n",
+        "  if param_layer['w'].shape == (4, 4, 1, 4):\n",
+        "    if checked['conv1']:\n",
+        "      raise ValueError(\"One of the convolutional layers is invalid\")\n",
+        "    checked['conv1'] = True\n",
+        "  elif param_layer['w'].shape == (4, 4, 4, 4):\n",
+        "    if checked['conv2']:\n",
+        "      raise ValueError(\"One of the convolutional layers is invalid\")\n",
+        "    checked['conv2'] = True\n",
+        "  elif param_layer['w'].shape == (784, 10):\n",
+        "    if checked['linear']:\n",
+        "      raise ValueError(\"Two linear layers found\")\n",
+        "    checked['linear'] = False\n",
+        "  else:\n",
+        "    raise ValueError(\"Invalid layer found.\")\n",
+        "\n",
+        "test_transform = hk.without_apply_rng(hk.transform(my_net))\n",
+        "val_ds = load_and_prepare_dataset('test', 11)\n",
+        "val_sample, val_label = next(val_ds.as_numpy_iterator())\n",
+        "\n",
+        "test_pred = test_transform.apply(network_params, val_sample)\n",
+        "if test_pred.shape != (11, 10):\n",
+        "  raise ValueError(\"Invalid output shape.\")\n",
+        "print(\"Correct !\")"
+      ],
+      "metadata": {
+        "cellView": "form",
+        "id": "mGF_coK9z-hB"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "## Exercice 3: define your loss function\n",
+        "\n",
+        "As a reminder, from the vector of scores $(\\mathbf{x}_i)_i$ given by the classification network, the \"probability\" vector is obtained with the **softmax** operator:\n",
+        "\n",
+        "\\begin{align}\n",
+        "\\hat{\\mathbf{p}}_i = \\frac{\\text{exp}(x_i)}{\\sum_j \\text{exp}(x_j)}\n",
+        "\\end{align}\n",
+        "\n",
+        "For the classification loss itself we use the **cross-entropy**:\n",
+        "\n",
+        "\\begin{align}\n",
+        "\\mathbf{H}(\\mathbf{y}, \\hat{\\mathbf{p}}) = -\\sum_i y_i \\text{log}(\\hat{p}_i)\n",
+        "\\end{align}\n",
+        "\n",
+        "Where $\\mathbf{y}$ is the probability distibution of the ground truth.\n",
+        "\n",
+        "Therefore, if $l$ is the ground truth label corresponding to the scores $(\\mathbf{x}_i)_i$, then we have $y_l=1$ and $y_i=0$ if $i \\neq l$. Then the loss becomes:\n",
+        "\n",
+        "\\begin{align}\n",
+        "\\mathcal{L}(l, \\mathbf{x}) & = -\\text{log}(\\hat{p}_l) \\\\\n",
+        "                               & = \\text{log}(\\sum_j \\text{exp}(x_j)) - x_l\n",
+        "\\end{align}\n",
+        "\n",
+        "Using the [`jax.nn`](https://jax.readthedocs.io/en/latest/jax.nn.html) package, define a function, `softmax_cross_entropy` which takes as input a batch of  scores $\\mathbf{x}$ with its labels $l$ and output the cross entropy loss between the softmax probability of the vectors $\\mathbf{x}$ and the ground truth probability $\\mathbf{y}$ corresponding to the labels $l$."
+      ],
+      "metadata": {
+        "id": "c9FFExZH2Nf7"
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "def softmax_cross_entropy(\n",
+        "    logits: jnp.ndarray,\n",
+        "    labels: jnp.ndarray,\n",
+        ") -> jnp.ndarray:\n",
+        "  \"\"\"Cross entropy loss between the softmax of the scores and the given labels.\n",
+        "\n",
+        "  Args:\n",
+        "    logits: a float tensor of shape (batch_size, n_classes) corresponding to the\n",
+        "     output of the classification network.\n",
+        "    labels: an integer tensor of shape (batch_size,) giving the ground truth\n",
+        "     labels corresponding to the predictions logits\n",
+        "  Returns:\n",
+        "    An array with a single element corresponding to the sum over all the batch\n",
+        "    of the softmax cross entropy loss of each couple (prediction, label) of the\n",
+        "    batch.\n",
+        "  \"\"\"\n",
+        "\n",
+        "  return ...\n"
+      ],
+      "metadata": {
+        "id": "YYqHZ8mQ2P-R"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "#@title Testing the softmax cross entropy { form-width: \"30%\" }\n",
+        "preds_0 = np.array([[0., 0., 0.], [1., -100000000, -10000000]])\n",
+        "labels_0 = np.array([1, 0])\n",
+        "\n",
+        "loss_0 = softmax_cross_entropy(preds_0, labels_0)\n",
+        "expected_value = 1.09861228867 # log(3)\n",
+        "if loss_0.shape not in [(), (1,)]:\n",
+        "  raise ValueError(f\"Invalid output shape, expected a scalar array but got {loss_0.shape}\")\n",
+        "if abs(loss_0 - expected_value) >= 1e-3:\n",
+        "  raise ValueError(f\"Invalid loss: expected {expected_value} but got {loss_0}\")\n",
+        "\n",
+        "for _ in range(5):\n",
+        "  random_preds = np.random.normal(scale =10, size=(20, 33))\n",
+        "  random_labels = np.random.randint(0, 33, size= (20,))\n",
+        "  loss_random = softmax_cross_entropy(preds_0, labels_0)\n",
+        "  if loss_random < 0:\n",
+        "    raise ValueError(\"The loss should always be negative\")\n",
+        "print(\"Correct !\")"
+      ],
+      "metadata": {
+        "cellView": "form",
+        "id": "SgyuZrKydZOP"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "## Exercice 4: Update your network with optax\n",
+        "\n",
+        "Using [`jax.grad`](https://jax.readthedocs.io/en/latest/_autosummary/jax.grad.html) and  [`jax.tree_util.tree_map`](https://jax.readthedocs.io/en/latest/_autosummary/jax.tree_util.tree_map.html) you can easily perform a gradient descent. For example, see the following code:"
+      ],
+      "metadata": {
+        "id": "W-992PpRZgGH"
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "def linear_net(x):\n",
+        "  return hk.Linear(5)(x)\n",
+        "\n",
+        "n_samples = 100\n",
+        "dim_x = 4\n",
+        "sigma_y = 0.1\n",
+        "lr = 0.01\n",
+        "\n",
+        "mult = np.array([[0., 1., 5., 2.],\n",
+        "                 [1., 0., 0., 0.],\n",
+        "                 [0., 1., 0., 0.],\n",
+        "                 [0., 0., 1., 0.],\n",
+        "                 [0., 0., 0., 2.]]).transpose()\n",
+        "b = np.array([0., 1., 5., 2., 3.])\n",
+        "\n",
+        "input_x = np.random.normal(size=(n_samples, dim_x))\n",
+        "output_y = (input_x + sigma_y* np.random.normal(size=(n_samples, dim_x))) @ mult + b\n",
+        "\n",
+        "rng = jax.random.PRNGKey(42)\n",
+        "linear_net_transform = hk.without_apply_rng(hk.transform(linear_net))\n",
+        "linear_net_params = linear_net_transform.init(rng, input_x[0])\n",
+        "\n",
+        "def loss_fn(params, x, y):\n",
+        "  return jnp.sum((linear_net_transform.apply(params, x) -y)**2)\n",
+        "\n",
+        "for s in range(n_samples):\n",
+        "\n",
+        "  loss, grads = jax.value_and_grad(loss_fn)(linear_net_params,\n",
+        "                                            input_x[s],\n",
+        "                                            output_y[s])\n",
+        "  linear_net_params = jax.tree_util.tree_map(lambda val, g : val - lr*g,\n",
+        "                                             linear_net_params, grads)\n",
+        "\n",
+        "  if s% 10 == 0:\n",
+        "    print(f\"Step {s}, loss = {loss}\")"
+      ],
+      "metadata": {
+        "id": "e3H1y7GeZrsm"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "However the standard gradient descent is often the best possible optimizer to solve a problem. The [optax](https://optax.readthedocs.io/en/latest/) library gives you access to a large pannel of common optimizers you can use with jax and haiku.\n",
+        "\n",
+        "Optax optimizers are used in a similar fashion as haiku's transform. Basically, when you use an optax optimizer you must consider two objects:\n",
+        "- an optimization function\n",
+        "- the optimizer's state\n",
+        "\n",
+        "Why two ? Because jax is pure and therefore you cannot have an implicit modification of the parameters of your optimizer. With optax, the loop above becomes:"
+      ],
+      "metadata": {
+        "id": "H7zJHZJ_dGVk"
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "def linear_net(x):\n",
+        "  return hk.Linear(5)(x)\n",
+        "\n",
+        "n_samples = 100\n",
+        "dim_x = 4\n",
+        "sigma_y = 0.1\n",
+        "lr = 0.01\n",
+        "\n",
+        "mult = np.array([[0., 1., 5., 2.],\n",
+        "                 [1., 0., 0., 0.],\n",
+        "                 [0., 1., 0., 0.],\n",
+        "                 [0., 0., 1., 0.],\n",
+        "                 [0., 0., 0., 2.]]).transpose()\n",
+        "b = np.array([0., 1., 5., 2., 3.])\n",
+        "\n",
+        "input_x = np.random.normal(size=(n_samples, dim_x))\n",
+        "output_y = (input_x + sigma_y* np.random.normal(size=(n_samples, dim_x))) @ mult + b\n",
+        "\n",
+        "rng = jax.random.PRNGKey(42)\n",
+        "linear_net_transform = hk.without_apply_rng(hk.transform(linear_net))\n",
+        "linear_net_params = linear_net_transform.init(rng, input_x[0])\n",
+        "\n",
+        "optimizer = optax.sgd(lr)\n",
+        "opt_state = optimizer.init(linear_net_params)\n",
+        "\n",
+        "def loss_fn(params, x, y):\n",
+        "  return jnp.sum((linear_net_transform.apply(params, x) -y)**2)\n",
+        "\n",
+        "for s in range(n_samples):\n",
+        "\n",
+        "  loss, grads = jax.value_and_grad(loss_fn)(linear_net_params,\n",
+        "                                            input_x[s],\n",
+        "                                            output_y[s])\n",
+        "  updates, new_opt_state = optimizer.update(grads, opt_state)\n",
+        "  linear_net_params = optax.apply_updates(linear_net_params, updates)\n",
+        "\n",
+        "  if s% 10 == 0:\n",
+        "    print(f\"Step {s}, loss = {loss}\")"
+      ],
+      "metadata": {
+        "id": "1aDR0I1Tfris"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "1) Modifiy the previous loop to try out several optimizers available in the [optax library](https://optax.readthedocs.io/en/latest/api.html). Find the one leading to the most stable results."
+      ],
+      "metadata": {
+        "id": "b5JturMrhWfw"
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "def linear_net(x):\n",
+        "  return hk.Linear(5)(x)\n",
+        "\n",
+        "n_samples = 100\n",
+        "dim_x = 4\n",
+        "sigma_y = 0.1\n",
+        "lr = 0.01\n",
+        "\n",
+        "mult = np.array([[0., 1., 5., 2.],\n",
+        "                 [1., 0., 0., 0.],\n",
+        "                 [0., 1., 0., 0.],\n",
+        "                 [0., 0., 1., 0.],\n",
+        "                 [0., 0., 0., 2.]]).transpose()\n",
+        "b = np.array([0., 1., 5., 2., 3.])\n",
+        "\n",
+        "input_x = np.random.normal(size=(n_samples, dim_x))\n",
+        "output_y = (input_x + sigma_y* np.random.normal(size=(n_samples, dim_x))) @ mult + b\n",
+        "\n",
+        "rng = jax.random.PRNGKey(42)\n",
+        "linear_net_transform = hk.without_apply_rng(hk.transform(linear_net))\n",
+        "linear_net_params = linear_net_transform.init(rng, input_x[0])\n",
+        "\n",
+        "optimizer = ...\n",
+        "opt_state = ...\n",
+        "\n",
+        "def loss_fn(params, x, y):\n",
+        "  return jnp.sum((linear_net_transform.apply(params, x) -y)**2)\n",
+        "\n",
+        "for s in range(n_samples):\n",
+        "\n",
+        "  loss, grads = jax.value_and_grad(loss_fn)(linear_net_params,\n",
+        "                                            input_x[s],\n",
+        "                                            output_y[s])\n",
+        "  updates, new_opt_state = optimizer.update(grads, opt_state)\n",
+        "  linear_net_params = optax.apply_updates(linear_net_params, updates)\n",
+        "\n",
+        "  if s% 10 == 0:\n",
+        "    print(f\"Step {s}, loss = {loss}\")"
+      ],
+      "metadata": {
+        "id": "96LaFAQHhWBr"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "2) Define a function `update_fn` which takes as input:\n",
+        "- the neural network's transformed function\n",
+        "- the parameters of the neural network\n",
+        "- an optimizer\n",
+        "- an optimizer state\n",
+        "- an input batch `x`\n",
+        "- a batch of ground truth labels\n",
+        "\n",
+        "And returns the new parameters, the new optimizer state and the corresponding loss after a step to minimize the softmax cross entropy between the ground truth labels and the output of the neural network for the given batch `x`."
+      ],
+      "metadata": {
+        "id": "8odUFipfhnYG"
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "def update_fn(params: hk.Params,\n",
+        "              net: hk.Transformed,\n",
+        "              opt_state: optax.OptState,\n",
+        "              optimizer: optax.GradientTransformation,\n",
+        "              x: chex.Array,\n",
+        "              labels: chex.Array,\n",
+        "              ) -> Tuple[chex.Array, optax.OptState, hk.Params]:\n",
+        "  \"\"\"Update the given system for the softmax cross entropy loss.\n",
+        "\n",
+        "  Args:\n",
+        "    params: parameters of the neural network\n",
+        "    net: neural network's transformed function\n",
+        "    opt_state: optimizer state\n",
+        "    optimizer: optimization method\n",
+        "    x: input batch\n",
+        "    labels: ground truth labels\n",
+        "  \"\"\"\n",
+        "\n",
+        "  # Your code here\n",
+        "  return loss, new_opt_state, new_params"
+      ],
+      "metadata": {
+        "id": "MLcbWbuwjEqn"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "## Exercice 5: Inference function\n",
+        "\n",
+        "Define a function, `inference_fn` which takes as input: a network transformed with haiku, its parameters, an input batch and its label and outputs the prediction loss and accuracy of the system."
+      ],
+      "metadata": {
+        "id": "k0_0JqAQj96i"
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "def inference_fn(params: hk.Params,\n",
+        "                 net: hk.Transformed,\n",
+        "                 x: chex.Array,\n",
+        "                 labels: chex.Array) -> Tuple[chex.Array, chex.Array]:\n",
+        "  \"\"\"Run an inference with a given network.\n",
+        "\n",
+        "  Args:\n",
+        "    params: network's parameters\n",
+        "    net: network function as obtained by hk.transform\n",
+        "    x: input batch. Must have the shape (batch_size, width, height, 1).\n",
+        "    labels: input labels. Must have the shape (batch_size,)\n",
+        "  Returns:\n",
+        "    loss, accuracy\n",
+        "    loss: softmax cross entropy loss of the network's output scores and the\n",
+        "     ground truth labels\n",
+        "    accuracy: average accuracy of the prediction\n",
+        "  \"\"\"\n",
+        "  # Your code here !\n",
+        "  return loss, accuracy"
+      ],
+      "metadata": {
+        "id": "Fns1QJCLUF88"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "## Exercice 6: build your training loop\n",
+        "\n",
+        "Now complete the code below to build your training loop. You should reach an accuracy higher than 80% in less than 20 epochs. Don't forget to use `jax.jit` to make your code faster."
+      ],
+      "metadata": {
+        "id": "Yo240qFhizdw"
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "@dataclass(frozen=True)\n",
+        "class TrainingConfig:\n",
+        "  batch_size: int = 8\n",
+        "  learning_rate: int = 1e-4\n",
+        "  n_epochs: int = 20\n",
+        "  ## Do not hesitate to expand this class\n",
+        "\n",
+        "def training_loop(cfg: TrainingConfig):\n",
+        "\n",
+        "  # Load your datasets\n",
+        "  train_ds = ...\n",
+        "  valid_ds = ...\n",
+        "\n",
+        "  # Initialize your network here\n",
+        "  ...\n",
+        "  my_net =...\n",
+        "  my_params = ...\n",
+        "\n",
+        "  # Initialize your optimizer here\n",
+        "  optimizer = ...\n",
+        "  opt_state = ...\n",
+        "\n",
+        "  # Any additional code you want to add\n",
+        "  ...\n",
+        "\n",
+        "  for epoch in range(cfg.n_epochs):\n",
+        "\n",
+        "    # Load the training iterator\n",
+        "    train_iterator = ...\n",
+        "\n",
+        "    avg_train_loss = 0\n",
+        "    n_batches_train = 0\n",
+        "    # Train loop\n",
+        "    for data, label in train_iterator:\n",
+        "\n",
+        "      # Update your parameters\n",
+        "      loss, opt_state, my_params = ...\n",
+        "\n",
+        "      avg_train_loss += avg_train_loss\n",
+        "      n_batches_train+=1\n",
+        "\n",
+        "    # Validation loop\n",
+        "    valid_iterator = ...\n",
+        "    avg_loss_valid, avg_acc_valid = 0, 0\n",
+        "    n_batches_valid = 0\n",
+        "\n",
+        "    for data, label in valid_iterator:\n",
+        "\n",
+        "      loss, acc = ...\n",
+        "      avg_loss_valid+= loss\n",
+        "      avg_acc_valid+= acc\n",
+        "      n_batches_valid+=1\n",
+        "\n",
+        "    avg_loss_valid /= n_batches_valid\n",
+        "    avg_acc_valid /= n_batches_valid\n",
+        "    avg_train_loss /= n_batches_train\n",
+        "\n",
+        "  print(f\"Epoch {epoch}: \\ttrain-loss {avg_train_loss:.3f}\\tvalid_loss {avg_loss_valid:.3f}\\tvalid_acc {avg_acc_valid:.3f}\")\n",
+        "\n",
+        "training_loop(TrainingConfig())\n"
+      ],
+      "metadata": {
+        "id": "QScsSMdJZckF"
+      },
+      "execution_count": null,
+      "outputs": []
+    }
+  ]
+}
+

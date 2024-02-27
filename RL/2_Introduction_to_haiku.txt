@@ -1,0 +1,801 @@
+{
+  "cells": [
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "8kWyyXB_r3DF"
+      },
+      "source": [
+        "# Haiku"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "id": "GZxQkmH1v5AY"
+      },
+      "outputs": [],
+      "source": [
+        "#@title Installations  { form-width: \"30%\" }\n",
+        "\n",
+        "%pip install git+https://github.com/deepmind/acme.git#egg=dm-acme[jax,tf,envs]\n",
+        "\n",
+        "from IPython.display import clear_output\n",
+        "clear_output()"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "id": "51qpNTxFvh8H"
+      },
+      "outputs": [],
+      "source": [
+        "#@title Imports  { form-width: \"30%\" }\n",
+        "from typing import *\n",
+        "import haiku as hk\n",
+        "import jax\n",
+        "import jax.numpy as jnp\n",
+        "import chex\n",
+        "import matplotlib.pyplot as plt\n",
+        "%matplotlib inline"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "rBDLHmnlr56n"
+      },
+      "source": [
+        "## A few reminders about jax"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "RNbbM86AwBSM"
+      },
+      "source": [
+        "In the last practical session we learned the basis of jax. Here are a few reminder of the jax functions we will need here:\n",
+        "- `jax.grad`: computes the gradient of a function with respect to the first argument of this function.\n",
+        "- `jax.vmap`: apply a function to all the elements in the first axis of a given group of tensors\n",
+        "- `jax.jit`: compiles a given function to make it faster"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "id": "MC17ppeWrCXj"
+      },
+      "outputs": [],
+      "source": [
+        "# Example of jax.grad\n",
+        "def square_sum_x(x: chex.Array) -> chex.Array:\n",
+        "  return jnp.sum(x ** 2)\n",
+        "\n",
+        "# The expected gradient at x = [x0, x1, ..., xN] is [2*x0, 2*x1, ..., 2*xN].\n",
+        "\n",
+        "print(jax.grad(square_sum_x)(jnp.asarray([1., 2., 3., 4.])))\n",
+        "\n",
+        "# It also works with dictionary !\n",
+        "def mul_sum(params: Mapping[str, chex.Array]) -> chex.Array:\n",
+        "  x = params['x']\n",
+        "  y = params['y']\n",
+        "\n",
+        "  return jnp.sum(x * (y ** 2))\n",
+        "\n",
+        "my_dict = {\n",
+        "  'x': jnp.asarray([1., 2., 3., 4.]),\n",
+        "  'y': jnp.asarray([1., 2., 3., 4.]),\n",
+        "}\n",
+        "print(jax.grad(mul_sum)(my_dict))"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "id": "voOQxpFmsGjD"
+      },
+      "outputs": [],
+      "source": [
+        "## Example of jax.vmap\n",
+        "def mini_conv(x: chex.Array, index: chex.Array) -> chex.Array:\n",
+        "  return x[index] + x[index + 1]\n",
+        "\n",
+        "x = jnp.asarray([[1., 2., 3., 4.], [5., 6., 7., 8.]])\n",
+        "index = jnp.asarray([0, 1])\n",
+        "\n",
+        "# It should return [x[0, index[0]] + x[0, index[0] + 1],  x[1, index[1]] + x[1, index[1] + 1]]\n",
+        "print(jax.vmap(mini_conv)(x, index))"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "id": "nR7xm5YH34fG"
+      },
+      "outputs": [],
+      "source": [
+        "## Example of jax.jit\n",
+        "import time\n",
+        "def polynom(x: chex.Array, y: chex.Array) -> float:\n",
+        "    a = x + 1\n",
+        "    b = y[:, 1] ** 2\n",
+        "    c = x[0]\n",
+        "    return x ** 2 + c[None] * a + y + x + y ** 3 + a * b[:, None]\n",
+        "\n",
+        "n_iters = 1000\n",
+        "start_time = time.time()\n",
+        "\n",
+        "rng = jax.random.PRNGKey(0)\n",
+        "for _ in range(n_iters):\n",
+        "  cur_rng, rng = jax.random.split(rng)\n",
+        "  polynom(jax.random.normal(key=cur_rng, shape=(128, 12)),\n",
+        "          jax.random.normal(key=cur_rng, shape=(128, 12)))\n",
+        "print(f\"Running time without jitting: {time.time() - start_time}\")\n",
+        "\n",
+        "start_time = time.time()\n",
+        "jitted_polynom = jax.jit(polynom)\n",
+        "for _ in range(n_iters):\n",
+        "  cur_rng, rng = jax.random.split(rng)\n",
+        "  jitted_polynom(jax.random.normal(key=cur_rng, shape=(128, 12)),\n",
+        "                 jax.random.normal(key=cur_rng, shape=(128, 12)))\n",
+        "print(f\"Running time with jitting: {time.time() - start_time}\")"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "G53vJxqRsCw7"
+      },
+      "source": [
+        "## Introduction to haiku"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "PsOtDGeasFjI"
+      },
+      "source": [
+        "Haiku is to JAX what Sonnet was to TensorFlow. It allows you to simply and cleanly define (deep) neural network architectures of all kind. If you know Sonnet, or Keras, or the standard PyTorch network building facilities, you won't be too surprised by how Haiku is defining networks.\n",
+        "\n",
+        "The main difference between Haiku and those other NN libraries is the transform mechanism. As mentionned earlier, JAX works with pure function. However, the way most NN libraries build NN architectures is impure (in a functional sense): for instance, for each `torch.Module`, PyTorch defines a `forward` function, that takes the inputs of the networks, and outputs its final activations. This `forward` function is impure: it relies on the parameters of the networks, which are attributes of the encompassing object, but not given as parameters to the function each time you call it. You need to know the state of the encompassing object to get the output of the function.\n",
+        "\n",
+        "On the other hand, to compute the gradient of a function, JAX requires a pure function, i.e. a function that takes both the _inputs_ of the network, as well as its _parameters_, and outputs the resulting activations. If you have such a function `f(params, inputs)`, it is straightforward to compute its gradient w.r.t. `params`, using `grad(f)(params, inputs)`. However, passing parameters around when defining network architectures would require a lot of boilerplate. To relieve the user from those considerations, Haiku allows user to define impure functions to define the architecture of the network, by only passing inputs around, then transform those impure functions into pure ones, by using `hk.transform`. Let's look at an example:\n"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "id": "uG0tfUR7sgz9"
+      },
+      "outputs": [],
+      "source": [
+        "def easy_linear_net(x: chex.Array) -> chex.Array:\n",
+        "  out = hk.Linear(12)(x)\n",
+        "  return out"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "BRa0YLzdsskB"
+      },
+      "source": [
+        "This defines a simple linear layer with 12 outputs. For pytorch users, please note that with haiku neural network are not *objects* but *functions*. With jax and haiku, **we will always try to handle functions and limit the use of objects**. This will have a lot of consequences in the way you define your network, but we won't dwell on them in this session.\n",
+        "\n",
+        "Similar to Keras and Sonnet, Haiku does not require you to specify the size of your input when defining linear or convolutional layers. This function is impure, as `hk.Linear` implicitly defines some parameters. Directly calling it won't work and haiku will raise an exception saying you did not transform the function first. To be able to apply the module you have created, you need first to wrap it inside a `hk.transform` in the following way:"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "id": "wwc2zXoDssIS"
+      },
+      "outputs": [],
+      "source": [
+        "ez_linear = hk.transform(easy_linear_net)"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "NWzxI2Jvsyan"
+      },
+      "source": [
+        "`hk.transform` takes as input a **function** and build an `hk.Transformed` object which will be our neural network. This object has two important methods:\n",
+        "- `init` which initializes the parameters of your network\n",
+        "- `apply` which, given input data and network parameters will compute the output of the network"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "id": "WXAw2JEhtrfM"
+      },
+      "outputs": [],
+      "source": [
+        "# Initializing the network\n",
+        "# Please note that we need a random key for the initialization\n",
+        "ez_linear_params = ez_linear.init(rng=jax.random.PRNGKey(0), x=jnp.zeros((1, 6)))\n",
+        "print(\"Params\", ez_linear_params)\n",
+        "\n",
+        "# Applying the network to a given input\n",
+        "# We also need a random key here !\n",
+        "outputs = ez_linear.apply(params=ez_linear_params, rng=jax.random.PRNGKey(0), x=jnp.ones((1, 6)))\n",
+        "print(\"Outputs\", outputs)"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "6BN5Fl_VuEId"
+      },
+      "source": [
+        "As you can see the parameters are a dictionnary of tensors. Besides, we also need to provide a random key both for initialization and inference.\n",
+        "\n",
+        "**Question**: why do we need a random key to initialize the parameters of the network ?\n",
+        "\n",
+        "---\n",
+        " The reason why we need a random key for inference is trickier. Some neural networks run random operations, this is the case of network using random subsampling or dropout for example and therefore need a random key. In this session, *we won't use such networks*. Therefore, it is just painful to drag that rng key around. For this reason we use `hk.without_apply_rng` to get rid of it."
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "id": "6Iha5T03uaxm"
+      },
+      "outputs": [],
+      "source": [
+        "ez_linear = hk.without_apply_rng(hk.transform(easy_linear_net))\n",
+        "\n",
+        "outputs = ez_linear.apply(params=ez_linear_params, x=jnp.ones((1, 6)))\n",
+        "print(outputs)"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "lkPz_LJhvpRt"
+      },
+      "source": [
+        "From now on, we will **always** call `hk.without_apply_rng` when defining a new neural network."
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "DOhbKr3V0pv7"
+      },
+      "source": [
+        "**Exercise**:\n",
+        "\n",
+        "Define a network function that will take as input a tensor `x`, apply it a Linear layer of hidden dimension `5`, then a [ReLU](https://jax.readthedocs.io/en/latest/_autosummary/jax.nn.relu.html) activation function, and finally another Linear layer of hidden dimension `6`.\n",
+        "\n",
+        "You will call your haiku network `my_haiku_net` and its parameters `my_haiku_params`.\n",
+        "\n",
+        "Then initialize your function and test it on a ones tensor of shape (3, 12)."
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "id": "ommoTKFc1pdS"
+      },
+      "outputs": [],
+      "source": [
+        "def my_haiku_net_func(x: chex.Array) -> chex.Array:\n",
+        "  ## Your code here !\n",
+        "  ...\n",
+        "  return ...\n",
+        "\n",
+        "my_haiku_net = ...\n",
+        "my_haiku_params = ...\n",
+        "print(my_haiku_params)"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "sc6upcNj2nUC"
+      },
+      "source": [
+        "We have our neural network, now we need a gradient. Indeed, in deep learning, we often try to update our network paramerters to minimize a given loss and we do so by **gradient descent**.\n",
+        "\n",
+        "This loss has to be a function, and its first argument must be the network parameters. Here is an example:"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "id": "yZFzdWsxvo4M"
+      },
+      "outputs": [],
+      "source": [
+        "def loss_fn(params: hk.Params,\n",
+        "            net: hk.Transformed,\n",
+        "            input: chex.Array,\n",
+        "            ) -> chex.Array:\n",
+        "  return net.apply(params, input).sum()"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "sE523FXf3qPO"
+      },
+      "source": [
+        "**Question**: why is it important that the first argument of the loss is the network parameters ?\n",
+        "\n",
+        "**Question**: what is the dimension of the output of the loss function ? Why is it important ?"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "a4BwaPT79sOl"
+      },
+      "source": [
+        "Now let's try out this loss function on the network we defined before:"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "id": "AejbBVUw92xM"
+      },
+      "outputs": [],
+      "source": [
+        "my_loss = loss_fn(ez_linear_params, ez_linear, jnp.ones((1, 6)))\n",
+        "print(\"Loss\", my_loss)\n",
+        "\n",
+        "my_grad = jax.grad(loss_fn)(ez_linear_params, ez_linear, jnp.ones((1, 6)))\n",
+        "print(\"Gradient\", my_grad)"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "kZlDJdMOQ-9Y"
+      },
+      "source": [
+        "And to get both the loss and the gradient with a single call you can use [`jax.value_and_grad`](https://jax.readthedocs.io/en/latest/_autosummary/jax.value_and_grad.html)"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "id": "gUk1dpVuQ-T2"
+      },
+      "outputs": [],
+      "source": [
+        "my_loss, my_grad = jax.value_and_grad(loss_fn)(ez_linear_params, ez_linear, jnp.ones((1, 6)))\n",
+        "print(\"Loss\", my_loss)\n",
+        "print(\"Gradient\", my_grad)"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "ar3EpXnsYYwz"
+      },
+      "source": [
+        "Finally we need to define a way to update our parameters from the loss. To do so, we define an *update function*: this function will compute the gradient of the loss and update the parameters."
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "id": "_5XThQQQcGBE"
+      },
+      "outputs": [],
+      "source": [
+        "def update_fn(params: hk.Params,\n",
+        "              net: hk.Transformed,\n",
+        "              input: chex.Array,\n",
+        "              learning_rate: float,\n",
+        "              ) -> Tuple[chex.Array, hk.Params]:\n",
+        "\n",
+        "    loss, grad = jax.value_and_grad(loss_fn)(params, net, input)\n",
+        "    next_params = jax.tree_util.tree_map(lambda p, g: p - learning_rate * g, params, grad)\n",
+        "\n",
+        "    return loss, next_params\n",
+        "\n",
+        "my_loss, new_params = update_fn(ez_linear_params, ez_linear, jnp.ones((1, 6)), 0.1)\n",
+        "print(\"Loss\", my_loss)\n",
+        "print(\"Old network parameters\", ez_linear_params)\n",
+        "print(\"New network parameters\", new_params)"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "-lDfsrFVc9J1"
+      },
+      "source": [
+        "Note that we have introduced a new function: [`jax.tree_util.tree_map`](https://jax.readthedocs.io/en/latest/_autosummary/jax.tree_util.tree_map.html). This function works similarly as `jax.vmap` except that it applies a function to a list, a dictionnary or any other nested structure. See it by yourself in this example:"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "id": "QXvb9D4ydRYQ"
+      },
+      "outputs": [],
+      "source": [
+        "a = jnp.ones((2,2))\n",
+        "grad_a = jnp.asarray([[0.1, 0.], [0.2, 0.3]])\n",
+        "\n",
+        "b = jnp.zeros((4))\n",
+        "grad_b = jnp.asarray([0.1, 0., 0. , 0.])\n",
+        "\n",
+        "dict_vals = {'a': a, 'b': b}\n",
+        "dict_grad = {'a': grad_a, 'b': grad_b}\n",
+        "print(jax.tree_util.tree_map(lambda p, g: p - g, dict_vals, dict_grad))"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "x38UVuRoRWXa"
+      },
+      "source": [
+        "**Exercise:**\n",
+        "\n",
+        "Define a function `square_loss` that, given an input tensor `x`, and target tensor `target`, a network function `net` and its corresponding parameters params will compute the $L_2$ norm between net(x, params) and target.\n",
+        "\n",
+        "Then, define an update function `my_update` which returns the loss and the new parameters.\n",
+        "\n",
+        "Test this function with the network `my_haiku_net` you defined before and `x` a one tensor of shape (3, 12). And a target tensor `y` of shape (3, 6)."
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "id": "SqnqMT_BRV_G"
+      },
+      "outputs": [],
+      "source": [
+        "def square_loss(params: hk.Params,\n",
+        "                net: hk.Transformed,\n",
+        "                input: chex.Array,\n",
+        "                target: chex.Array,\n",
+        "                )-> chex.Array:\n",
+        "  ## Your code here\n",
+        "  return ...\n",
+        "\n",
+        "#Define the update function\n",
+        "def my_update(params: hk.Params,\n",
+        "              net: hk.Transformed,\n",
+        "              input: chex.Array,\n",
+        "              target: chex.Array,\n",
+        "              learning_rate: float,\n",
+        "              ) -> Tuple[chex.Array, hk.Params]:\n",
+        "  ...\n",
+        "  return loss, next_params\n",
+        "\n",
+        "test_value, new_params = my_update(my_haiku_params, my_haiku_net, jnp.ones((3, 12)), jnp.ones((3,6)), 0.1)\n",
+        "print(\"Value\", test_value)\n",
+        "print(\"New Parameters\", new_params)"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "huVhwzagSOYP"
+      },
+      "source": [
+        "Now let's implement a full linear regression. Complete the following code using all the function you defined before: `my_haiku_net`, `square_loss` and so on."
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "id": "fFSIKUT3SWWs"
+      },
+      "outputs": [],
+      "source": [
+        "from typing import *\n",
+        "import time\n",
+        "\n",
+        "# Create random dataset (Note that the seed make it deterministic)\n",
+        "inputs = jax.random.normal(key=jax.random.PRNGKey(0), shape=(128, 3))\n",
+        "outputs = 12 * jnp.concatenate([inputs, inputs], axis=-1) + 6 + jax.random.normal(key=jax.random.PRNGKey(0), shape=(128, 6))\n",
+        "\n",
+        "# Learning params\n",
+        "learning_rate = 1e-2\n",
+        "num_iterations = 5000\n",
+        "\n",
+        "# Init Network\n",
+        "# Use the network my_haiku_net you defined before\n",
+        "my_haiku_params = ...\n",
+        "\n",
+        "start_time = time.time()\n",
+        "for i in range(num_iterations):\n",
+        "\n",
+        "  if i % 100 == 99:\n",
+        "    print(f'Loss at iteration {i}: {loss}')\n",
+        "\n",
+        "  # Implement: Call the update function\n",
+        "  loss, my_haiku_params = ...\n",
+        "\n",
+        "print(f\"Total time: {time.time() - start_time}\")"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "j6FVA_A4U47N"
+      },
+      "source": [
+        "Finally, we can make things faster with jitting. No, trying to directly jit your `value_and_grad` function won't work. Indeed, your network function, which is of type `hk.Transformed`, is not an acceptable argument for jit. Let's give it a try with `ez_linear`."
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "id": "iDICnpmAVVRZ"
+      },
+      "outputs": [],
+      "source": [
+        "def loss_fn(params: hk.Params,\n",
+        "            net: hk.Transformed,\n",
+        "            input: chex.Array,\n",
+        "            ) -> chex.Array:\n",
+        "  return net.apply(params, input).sum()\n",
+        "\n",
+        "def update_fn(params: hk.Params,\n",
+        "              net: hk.Transformed,\n",
+        "              input: chex.Array,\n",
+        "              learning_rate: float,\n",
+        "              ) -> Tuple[chex.Array, hk.Params]:\n",
+        "\n",
+        "    loss, grad = jax.value_and_grad(loss_fn)(params, net, input)\n",
+        "    next_params = jax.tree_util.tree_map(lambda p, g: p - learning_rate * g, params, grad)\n",
+        "\n",
+        "    return loss, next_params\n",
+        "\n",
+        "my_loss, my_params = jax.jit(update_fn)(ez_linear_params, ez_linear, jnp.ones((1, 6)), 0.1)"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "HM4GHR1HWS9_"
+      },
+      "source": [
+        "You see, it is not working ! To work around that you would need to provide `jax.jit` a function that doesn't require a network as argument. You could for example do it with a lambda function:"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "id": "ygOIkQ6TVVO6"
+      },
+      "outputs": [],
+      "source": [
+        "update_fn_ez_linear = lambda params, x, lr: update_fn(params,ez_linear,x, lr)\n",
+        "my_loss, my_params = jax.jit(update_fn_ez_linear)(ez_linear_params, jnp.ones((1, 6)), 0.1)\n",
+        "print(\"Value\", my_loss)\n",
+        "print(\"Parameters\", my_params)"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "QkhUW_B2XLhq"
+      },
+      "source": [
+        "It's working ! Now redefine the training loop you made before with a **jitted** version of the `my_update` function you used.\n",
+        "Se that it is much faster !"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "id": "ZBzzQ42AVOO3"
+      },
+      "outputs": [],
+      "source": [
+        "from typing import *\n",
+        "import time\n",
+        "\n",
+        "# Create random dataset (Note that the seed make it deterministic)\n",
+        "inputs = jax.random.normal(key=jax.random.PRNGKey(0), shape=(128, 3))\n",
+        "outputs = 12 * jnp.concatenate([inputs, inputs], axis=-1) + 6 + jax.random.normal(key=jax.random.PRNGKey(0), shape=(128, 6))\n",
+        "\n",
+        "# Learning params\n",
+        "learning_rate = 1e-2\n",
+        "num_iterations = 5000\n",
+        "\n",
+        "# Init Network\n",
+        "# Use the network my_haiku_net you defined before\n",
+        "my_haiku_params = my_haiku_net.init(rng=jax.random.PRNGKey(0), x=inputs)\n",
+        "\n",
+        "my_jitted_update = jax.jit(lambda params, x, y, lr: my_update(params, my_haiku_net, x, y, lr))\n",
+        "start_time = time.time()\n",
+        "for i in range(num_iterations):\n",
+        "\n",
+        "  if i % 100 == 99:\n",
+        "    print(f'Loss at iteration {i}: {loss}')\n",
+        "\n",
+        "  # Implement: Call the update function\n",
+        "  loss, my_haiku_params = my_jitted_update(my_haiku_params, inputs, outputs, learning_rate)\n",
+        "\n",
+        "print(f\"Total time {time.time() - start_time}\")"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "yAY_fQ7GXsz8"
+      },
+      "source": [
+        "## Application\n",
+        "\n",
+        "Now let's apply everything you learned to a full scale exercise. You are going to train a *classifier network*. We start by building a dataset which associates to each input tensor `x` a label `y` which will be either $0$ or $1$."
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "id": "yAxFOiS8cVNj"
+      },
+      "outputs": [],
+      "source": [
+        "rng = jax.random.PRNGKey(0)\n",
+        "def build_input_output(rng):\n",
+        "  inputs = jax.random.normal(key=rng, shape=(8, 36))\n",
+        "  noisy_inputs = 12 * inputs + jax.random.normal(key=rng, shape=inputs.shape)\n",
+        "  outputs = noisy_inputs.sum(axis=1) > 6\n",
+        "  return inputs, outputs.astype(int)[:, None]\n",
+        "\n",
+        "sample_input, sample_output = build_input_output(rng)\n",
+        "print(\"Sample input\", sample_input)\n",
+        "print(\"Sample output\", sample_output)"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "iTRNGb9WiBmf"
+      },
+      "source": [
+        "Your network will take an input vector $x$ and network parameters $\\theta$ and will output a real number $f(x, \\theta)$.\n",
+        "\n",
+        "From this number, we will make the following prediction:\n",
+        "- if $f(x, \\theta) \\geq 0$ then the label associated to $x$ must be $1$\n",
+        "- else it should be $0$.\n",
+        "\n",
+        "\\\\\n",
+        "\n",
+        "To do so, we want define a loss $L$ so that, for a given batch $(x, y)$ of input data and labels:\n",
+        "- when $y_i =1 $ we want $f(x_i, \\theta)$ to be as big as possible, and $L(f(x, \\theta))$ as small as possible.\n",
+        "- when $y_i = 0$ we want $f(x_i, \\theta)$ to be as small as possible, and $L(f(x, \\theta))$ as small as possible.\n",
+        "\n",
+        "The following function would do the job:\n",
+        "\n",
+        "$ L(f(x, y,\\theta)) = \\sum_{x_i} f(x_i, \\theta) * (1 - 2y_i) $\n",
+        "\n",
+        "However, in the current state the network won't be stable: indeed $L$ doesn't have a minimum and therefore the gradient descenr would push $L$ down to $-∞$. To avoid that, we add what we add a **regularization term** to $L$:\n",
+        "\n",
+        "$ L(f(x, y,\\theta)) = \\sum_{x_i} f(x_i, \\theta) * (1 - 2y_i) + 0.01 * \\sum_{x_i} f(x_i, \\theta)^2$.\n",
+        "\n",
+        "With this term, we are now sure that $L$ actually has a minimum.\n",
+        "\n",
+        "\\\\\n",
+        "\n",
+        "Your function f will be a neural network which applies to x in the following order:\n",
+        "- a linear layer with output dimension 12\n",
+        "- a ReLU\n",
+        "- another linear layer with with output dimension 12\n",
+        "- a ReLU\n",
+        "- a linear layer with output dimension 1\n",
+        "\n",
+        "Now you can complete the following code !"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "id": "wZTOTB5dkzF_"
+      },
+      "outputs": [],
+      "source": [
+        "# Initialize an rng key\n",
+        "\n",
+        "rng = jax.random.PRNGKey(0)\n",
+        "def my_net_func(x : chex.Array):\n",
+        "  ...\n",
+        "  return ...\n",
+        "\n",
+        "my_net = ...\n",
+        "\n",
+        "sample_input, sample_output = build_input_output(rng)\n",
+        "my_params = ...\n",
+        "\n",
+        "def my_loss(params, net, x, labels):\n",
+        "  # Your code here !\n",
+        "  return ...\n",
+        "\n",
+        "## And your update function\n",
+        "def my_update_function(params, net, x, labels, learning_rate):\n",
+        "  # Your code here !\n",
+        "  ...\n",
+        "  return loss, new_params\n",
+        "\n",
+        "## We will use an acuracy function to see how fast the network is learning\n",
+        "def my_accuracy(params, net, x, labels):\n",
+        "  # Your code here !\n",
+        "  ...\n",
+        "  return ...\n",
+        "\n",
+        "############################\n",
+        "# Training loop\n",
+        "############################\n",
+        "\n",
+        "# Learning params\n",
+        "learning_rate = 1e-2\n",
+        "num_iterations = 1000\n",
+        "accuracy = 0\n",
+        "\n",
+        "# Jit your update function\n",
+        "my_jitted_update = ...\n",
+        "\n",
+        "for i in range(num_iterations):\n",
+        "\n",
+        "  # Reminder: jax is pure, so we need a way to update the rng seed to get\n",
+        "  # a truly random sequence\n",
+        "  cur_rng, rng = jax.random.split(rng)\n",
+        "\n",
+        "  input, labels = build_input_output(cur_rng)\n",
+        "\n",
+        "  # Implement: Call the update function\n",
+        "  loss, my_params = ...\n",
+        "\n",
+        "  accuracy = ...\n",
+        "\n",
+        "  if i % 100 == 0:\n",
+        "    print(f'Acuracy at iteration {i}: {accuracy}')\n",
+        "    print(f'Loss at iteration {i}: {loss}')\n"
+      ]
+    }
+  ],
+  "metadata": {
+    "colab": {
+      "provenance": []
+    },
+    "kernelspec": {
+      "display_name": "Python 3",
+      "name": "python3"
+    },
+    "language_info": {
+      "name": "python"
+    }
+  },
+  "nbformat": 4,
+  "nbformat_minor": 0
+}

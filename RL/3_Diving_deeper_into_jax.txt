@@ -1,0 +1,767 @@
+{
+  "cells": [
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "a_vbrBxWc8O2"
+      },
+      "source": [
+        "# Licence\n"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "id": "WTl-ivwIcS38"
+      },
+      "outputs": [],
+      "source": [
+        "#Licence\n",
+        "#Copyright 2021 Google LLC.\n",
+        "#SPDX-License-Identifier: Apache-2.0"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "ErkTGyQ0Qase"
+      },
+      "source": [
+        "# Diving Deeper into Jax's internal\n",
+        "If you are already a bit familiar with jax, this practical will give you more explanations about what jax is actually doing when jitting code."
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "JVaNs4WEQekY"
+      },
+      "source": [
+        "###Installation"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "cellView": "form",
+        "id": "gDZSbrcjQkJ5"
+      },
+      "outputs": [],
+      "source": [
+        "#@title Installations  { form-width: \"30%\" }\n",
+        "\n",
+        "%pip install git+https://github.com/deepmind/acme.git#egg=dm-acme[jax,tf,envs]\n",
+        "\n",
+        "from IPython.display import clear_output\n",
+        "clear_output()"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "colab": {
+          "base_uri": "https://localhost:8080/"
+        },
+        "id": "sBqd3jWPQ6YJ",
+        "outputId": "4cb1f3b9-5b64-4fe3-83c3-d0915f5c7160"
+      },
+      "outputs": [],
+      "source": [
+        "#@title Imports  { form-width: \"30%\" }\n",
+        "\n",
+        "from typing import *\n",
+        "import IPython\n",
+        "\n",
+        "import base64\n",
+        "import chex\n",
+        "import collections\n",
+        "from collections import namedtuple\n",
+        "import dm_env\n",
+        "import enum\n",
+        "import functools\n",
+        "import gym\n",
+        "import haiku as hk\n",
+        "import io\n",
+        "import itertools\n",
+        "import jax\n",
+        "from jax import tree_util\n",
+        "import optax\n",
+        "import jax.numpy as jnp\n",
+        "import matplotlib.pyplot as plt\n",
+        "import numpy as np\n",
+        "import pandas as pd\n",
+        "import random\n",
+        "import reverb\n",
+        "import rlax\n",
+        "import time\n",
+        "from bsuite import environments\n",
+        "import bsuite.environments.catch as dm_catch\n",
+        "\n",
+        "import warnings\n",
+        "\n",
+        "np.set_printoptions(precision=3, suppress=1)\n",
+        "\n",
+        "%matplotlib inline"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "07DqdYQoO_HZ"
+      },
+      "source": [
+        "### 1. Jaxpr\n",
+        "\n"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "hvkbBXa90o5C"
+      },
+      "source": [
+        "To get a better understanding of what you can and cannot do with JAX, we will dive a bit deeper into its internals.\n",
+        "\n",
+        "When you define a function in term of JAX (or `jax.numpy`) operations, JAX allows you to produce a `jaxpr` for this function. A `jaxpr` is simply a reformulation of the function in JAX's own language. You can examine this `jaxpr` by applying the `jax.make_jaxpr`.\n",
+        "\n",
+        "Internally, to get this `jaxpr`, JAX **traces** the function. Tracing the function means that, instead of passing in the actual inputs/tensors that you provided to the function, JAX will pass *abstract tensors*, that typically contain the shape and dtype information of your actual inputs, but not necessarily their values. By passing those abstract tensors through the sequence of operations that the function performs, and remembering the sequence of operations applied, JAX can build a computational graph, much like PyTorch would. After reaching the return statement of the function, JAX can transcribe this computational graph into a sequence of operations that will constitute the `jaxpr` for the function.\n",
+        "\n",
+        "The code below provides an example of `jaxpr` produced by tracing two functions `func1` and `func2`. As you can see, JAX decomposes each expression into elementary operations, that makes it so that the `jaxpr` for the two functions are the same."
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "id": "q1q7Z_fRP2D0"
+      },
+      "outputs": [],
+      "source": [
+        "def func1(a: chex.Array, b: chex.Array):\n",
+        "  temp = a + jnp.sin(b) * 3.\n",
+        "  return jnp.sum(temp)\n",
+        "\n",
+        "\n",
+        "def func2(a: chex.Array, b: chex.Array):\n",
+        "  x = jnp.sin(b)\n",
+        "  x = x * 3\n",
+        "  y = a\n",
+        "  temp = x + y\n",
+        "  temp = jnp.sum(temp)\n",
+        "  return temp\n",
+        "\n",
+        "\n",
+        "print(jax.make_jaxpr(func1)(jnp.zeros(8), jnp.ones(8)))\n",
+        "print()\n",
+        "print(jax.make_jaxpr(func2)(jnp.zeros(8), jnp.ones(8)))"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "MZyZvlICUJos"
+      },
+      "source": [
+        "Translating python into `jaxpr` is how JAX is able to compute *transformations* of the initial function provided, such as computing gradients with `jax.grad`, parallelizing with `jax.vmap`, or jitting, with `jax.jit`. For instance, when you apply `jax.grad` to a function and use the resulting function on an input, internally, `jax` traces through the original function, then, from the `jaxpr` of the forward pass produces the `jaxpr` corresponding to the backward pass (much like you would be able to backpropagate through a computational graph once you have built it).\n",
+        "\n",
+        "Using the `jax.make_jaxpr` function, you can have a look at the jaxpr produced when you are computing the gradient of a given function."
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "id": "rxVK8FItTnOZ"
+      },
+      "outputs": [],
+      "source": [
+        "def func3(a: chex.Array):\n",
+        "  return jnp.sum(jnp.sin(a))\n",
+        "\n",
+        "print(jax.make_jaxpr(func3)(jnp.ones(8)))\n",
+        "print()\n",
+        "print(jax.make_jaxpr(jax.grad(func3))(jnp.ones(8)))"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "yOR9p4pdUT-v"
+      },
+      "source": [
+        "When you simply call `jax.grad` or `jax.vmap` on a function, without jitting the result, JAX will build the forward and backpropagation `jaxpr` each time you are calling the gradient function. This has upsides, such as, for example, giving you the possibility to print debug, by printing the values and shapes of the traced tensors on each calls, giving you the possibility to set breakpoints within your function, or allowing you to change the shape and dtypes of your arguments on each call. However, this also bears a lot of additional costs, as you need to recompute the graph each time you are calling the function, and you are typically unable to optimize what happens internally in your function (e.g. reducing memory or computation usage by recognizing computations that produce the same quantities, or merging operations into primitives of the hardware that you are considering).\n",
+        "\n",
+        "On the other hand, when you `jit` a function, JAX traces the function that you provided, produces a `jaxpr` for this function, and optimizes the resulting `jaxpr` based function. JAX will neither trace, nor recompile a jitted function when it is called several times on inputs with similar shapes and dtypes (but not necessarily values). It will simply reused the optimised version that was obtained after the first tracing and compilation. This typically explains why JAX is adverse to non pure functions: as tracing is done only once for a jitted function, the jitted function is blind to changes in the original python function that may have been occasionated by side effects in the program.\n",
+        "\n",
+        "On a side note, tracing and compilation will be performed each time you provide an argument with a different `shape` or `dtype` to a jitted function. This happens notably because JAX (and its underlying backend XLA) checks shapes, and tries to optimize computations based on the shapes of the tensors provided as input."
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "HjACJJbbW2ux"
+      },
+      "source": [
+        "#### 3.1. JAX and prints\n"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "K2kA2wUr0hX4"
+      },
+      "source": [
+        "One consequence of the fact that jitting makes it so that the initial function you defined is replaced by a `jaxpr` based equivalent is that when jitting a function, print statements or breakpoints will only appear at **trace** time (i.e. each time the jitted function is applied with an input with different shapes), since those print statements are not transcribed to `jaxpr`.\n",
+        "\n",
+        "**Question:** Before executing the next cell, try to guess the result that you will be obtaining."
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "id": "3hvZRK-jW2O1"
+      },
+      "outputs": [],
+      "source": [
+        "def func5(x: chex.Array) -> chex.Array:\n",
+        "  print(\"Hey, I am called!!! X value is:\", x)\n",
+        "  ln_x = jnp.log(x)\n",
+        "  ln_2 = jnp.log(2.0)\n",
+        "  return ln_x / ln_2\n",
+        "\n",
+        "print(\"In the trace, there is no 'trace' of the print call\")\n",
+        "print(jax.make_jaxpr(func5)(3.))\n",
+        "print()\n",
+        "\n",
+        "\n",
+        "# not jitted (the trace is regenerated at each time)\n",
+        "print(\"Function calls before jit\")\n",
+        "func5(3.0)\n",
+        "func5(3.0)\n",
+        "func5(3.0)\n",
+        "\n",
+        "# jitted (trace is generated once, and thus the python call is done only once)\n",
+        "print(\"Function calls after jit\")\n",
+        "func5_jit = jax.jit(func5)\n",
+        "func5_jit(3.0)\n",
+        "func5_jit(3.0)\n",
+        "func5_jit(3.0)\n",
+        "print(\"Changing the shape of the argument\")\n",
+        "func5_jit(jnp.array([3.0, 3.0]))\n",
+        "func5_jit(jnp.array([3.0, 3.0]))\n",
+        "print(\"Done!\")"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "-8Swylv0ZTWu"
+      },
+      "source": [
+        "#### 3.2. JAX and control flows\n"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "rz3jcP-00Vb-"
+      },
+      "source": [
+        "One other consequence of JAX's tracing process is that, when you are jitting a function, JAX starts by tracing the function, i.e. executing the function with **Tracer values**, which can typically not be used as operands for python logical control flows. Typically, you cannot compare the value of a traced tensor to anything.\n",
+        "\n",
+        "**Question:**\n",
+        "Do you think that the following code works? Why?"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "id": "v1XxehDXZS4H"
+      },
+      "outputs": [],
+      "source": [
+        "def func6(x: chex.Array):\n",
+        "  if x > 0:\n",
+        "    return x\n",
+        "  else:\n",
+        "    return 2 * x\n",
+        "\n",
+        "print(func6(10))\n",
+        "print(func6(-10))"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "QrIkPIjXZhU2"
+      },
+      "source": [
+        "**Question:**\n",
+        "Do you think that the following code works?"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "id": "z7l3TyMAZf8_"
+      },
+      "outputs": [],
+      "source": [
+        "def func6(x: chex.Array):\n",
+        "  if x > 0:\n",
+        "    return x\n",
+        "  else:\n",
+        "    return 2 * x\n",
+        "\n",
+        "func6_jit = jax.jit(func6)\n",
+        "print(func6_jit(10))\n",
+        "print(func6_jit(-10))"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "LPlhHxIVaIYw"
+      },
+      "source": [
+        "#### Explanation\n"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "o919amO20O4Y"
+      },
+      "source": [
+        "\n",
+        "Passing in a Tracer value to the \"if\" does not evaluate to something sensical, you cannot pick between the branches, so jax is raising an error!"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "t2Z2TgW_aZ_L"
+      },
+      "source": [
+        "**Question:** Do you think the following code runs"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "id": "g1oZ5z1raVCx"
+      },
+      "outputs": [],
+      "source": [
+        "def func7(x: chex.Array, is_training: bool):\n",
+        "  if is_training:\n",
+        "    return x\n",
+        "  else:\n",
+        "    return 2 * x\n",
+        "\n",
+        "func7_jit = jax.jit(func7)\n",
+        "print(func7_jit(10, is_training=True))\n",
+        "print(func7_jit(10, is_training=False))\n"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "iq9_0R6tbgWj"
+      },
+      "source": [
+        "#### 3.3. JAX and static arguments\n"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "5eD4d7Kx0ajI"
+      },
+      "source": [
+        "One solution is to tell JAX not to trace the value of the second argument when jitting. There are essentially two ways of doing that. One is to explicitly ask JAX to not trace the second argument, by using the `static_argnums` argument of the jit function, and specifying the argument at position 1. The other one is to define two versions of the above function, one specialized for the value `is_training=True` and one specialized for the value `is_training=True`, typically by using `functools.partial`."
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "id": "XzD25VB6besO"
+      },
+      "outputs": [],
+      "source": [
+        "import functools\n",
+        "func7_training_jit = jax.jit(functools.partial(func7, is_training=True))\n",
+        "func7_evaluation_jit = jax.jit(functools.partial(func7, is_training=False))\n",
+        "\n",
+        "print(func7_training_jit(10))\n",
+        "print(func7_evaluation_jit(10))"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "fVcwE5sFcSHW"
+      },
+      "source": [
+        "You also have some control flow operations in JAX, when you really need to have tensor value dependent control flows, e.g. `jax.lax.cond`!\n",
+        "\n",
+        "\n",
+        "```\n",
+        "def cond(pred, true_fun, false_fun, *operands):\n",
+        "  if pred:\n",
+        "    return true_fun(*operands)\n",
+        "  else:\n",
+        "    return false_fun(*operands)\n",
+        "```\n",
+        "JAX built-in control flows are typically to be used when the control flows you want to implement are depending on things that need to be tensor values (e.g. parameters, gradients, value of activations, ...). For other control flows, you should rather use `static_argnums` or `functools.partial`."
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "id": "xivjmFBfbseV"
+      },
+      "outputs": [],
+      "source": [
+        "def func8(x: chex.Array, is_training: bool):\n",
+        "  # This would typically not be a great example, since is_training\n",
+        "  # can easily be made to be not a tensor value.\n",
+        "  return jax.lax.cond(is_training,\n",
+        "                      lambda a: a,   # provide the function if true\n",
+        "                      lambda a: 2*a, # profide the function is false\n",
+        "                      operand=x)     # say which variable to use\n",
+        "\n",
+        "func8_jit = jax.jit(func8)\n",
+        "print(func8_jit(10, is_training=True))\n",
+        "print(func8_jit(10, is_training=False))\n"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "g1zmS-Km06ci"
+      },
+      "source": [
+        "### 2. Diving even deeper into JAX internals"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "riew0aGw1CjS"
+      },
+      "source": [
+        "To get a sense of what kind of optimizations `jax.jit` is doing, we would like to have a look at the code produced when using either a plain old 'inefficient' function, and its jitted version. For the sake of the example, let's look at the following naive function:"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "id": "K0PQNj_Y1aY7"
+      },
+      "outputs": [],
+      "source": [
+        "def f(x: chex.Array) -> chex.Array:\n",
+        "  x1 = x + 3.\n",
+        "  x2 = x + 3.\n",
+        "  return x1 + x2"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "NbZJw2Db1hKu"
+      },
+      "source": [
+        "We can rewrite a simpler more efficient version quite easily as:"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "id": "qmiJm37C1gmC"
+      },
+      "outputs": [],
+      "source": [
+        "def g(x: chex.Array) -> chex.Array:\n",
+        "  x1 = x + 3.\n",
+        "  return x1 + x1"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "WUVZPgTy1q90"
+      },
+      "source": [
+        "Let us first have a look at the `jaxpr` produced when we use `jax.make_jaxpr` on both functions:"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "id": "ZKBpM98k1o6F"
+      },
+      "outputs": [],
+      "source": [
+        "print(f\"f's jaxpr: \\n {jax.make_jaxpr(f)(1.)}\")\n",
+        "print(f\"g's jaxpr: \\n {jax.make_jaxpr(g)(1.)}\")"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "96gEcA2D2apb"
+      },
+      "source": [
+        "We notice that, even when tracing to produce the `jaxpr`, JAX does not optimize the computation by merging the computations of `x1` and `x2`. Let's have a look at what happens when we are using `jax.jit`:"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "id": "XHFmn90E3O0o"
+      },
+      "outputs": [],
+      "source": [
+        "print(f\"jitted f's jaxpr: \\n {jax.make_jaxpr(jax.jit(f))(1.)}\")"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "3E3aGhcm3TEM"
+      },
+      "source": [
+        "No luck, JAX is only telling us that our initial function is getting deferred to an `xla_call`. To actually see what's happening, we will have to look further under the hood, and actually go to the next level of compilation.\n",
+        "\n",
+        "Once it has traced a function for jitting, JAX defer the next pass of optimization to XLA. XLA is going to take in our `jaxpr` and transform it into a lower level language called `HLO` (for high level operations). It is then going to compile hlo first into optimized hlo (but without optimizing for the specific hardware it is considering), then into an even lower level language that, in turn, is going to be hardware dependent (different depending on whether you are running on CPU, GPU or TPU).\n",
+        "\n",
+        "Let's first try to have a look at the unoptimized hlo of our f function:"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "id": "yJIEfmDg4kSo"
+      },
+      "outputs": [],
+      "source": [
+        "print(f\"f's hlo: \\n {jax.xla_computation(f)(1.).as_hlo_text()}\")\n",
+        "print(f\"g's hlo: \\n {jax.xla_computation(g)(1.).as_hlo_text()}\")"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "wW9HJ3A_5WuH"
+      },
+      "source": [
+        "The output is a bit harder to read, but we still see that f's and g's hlo are similar, with f having on more line corresponding to the additional add.\n",
+        "\n",
+        "Looking at the optimized hlo is not as easy, so we definitely don't want you to remember how to do it (it's not as simple as asking for the xla_computation of the jitted function), but we will do it here to have a look at the difference between the optimized and unoptimized hlo:"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "id": "0vXUWlG05x0x"
+      },
+      "outputs": [],
+      "source": [
+        "print(f\"f's optimized hlo: \\n {jax.jit(f).lower(1.0).compile().as_text()}\\n\")\n",
+        "print(f\"g's optimized hlo: \\n {jax.jit(g).lower(1.0).compile().as_text()}\")"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "doX77FAl6UJX"
+      },
+      "source": [
+        "And this time, the optimized hlo of both `g` and `f` match. XLA is oftentimes quite good at noticing duplicated computations and reducing them.\n",
+        "\n",
+        "This typically means that when jitting code, you can be more concerned about the readability of your code, and less concerned about its efficiency. In many cases, there is a good chance that XLA will do a better job than you at doing micro optimizations.\n",
+        "\n",
+        "Another key take-away is that you should always jit as late as possible in your computations (except when you are faced with specific memory problems, or that you are bottlenecked by compilation time). Jitting late implies that XLA will be able to optimize your code globally instead of locally, while jitting early implies that XLA will only be able to optimize subparts of your code, without the possibility to look at the more global context. So typically, you should nearly always do `jax.jit(jax.grad(...))` instead of `jax.grad(jax.jit(...))`. Oftentimes, you can even go as far as incorporating the optimizer step, or even several optimizer steps in a single jit."
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "yWTo1GZjssEv"
+      },
+      "source": [
+        "There is one mistake that is recurrent in newcomer's JAX code, and that you will probably make at some point, which consists in forgetting that JAX function should remain pure, and will badly handle (impure) side effects. We present here a simple case where this mistake is made and the corresponding code does not behave as one could imagine."
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "id": "YAGOPC7utNdo"
+      },
+      "outputs": [],
+      "source": [
+        "class CounterAndJax:\n",
+        "  def __init__(self) -> None:\n",
+        "    self._counter = 0\n",
+        "\n",
+        "  def increment(self) -> None:\n",
+        "    self._counter += 1\n",
+        "\n",
+        "  def apply(self, x: chex.Array) -> chex.Array:\n",
+        "    return x + self._counter"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "mhA3WhJXtv72"
+      },
+      "source": [
+        "The class `CounterAndJax` maintains a counter and has an apply method that can be applied to a `chex.Array`. We already see that `apply` is not a pure function. `apply` internally uses the `CounterAndJax` attribute `_counter`, which is not provided as an explicit argument. Can you guess what will be the result of the following computation:"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "id": "o2Hkj-0iudFd"
+      },
+      "outputs": [],
+      "source": [
+        "caj = CounterAndJax()\n",
+        "caj.increment()\n",
+        "caj.apply(jnp.zeros((3,)))"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "6vBzuQPpvRoj"
+      },
+      "source": [
+        "It did the _correct_ thing, of actually incrementing the counter, then using the new value when applied. So why are we even bothering with only using pure functions? Let's try something else. Can you guess what the following code will print out?"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "id": "HY1U6OIDvhqL"
+      },
+      "outputs": [],
+      "source": [
+        "caj = CounterAndJax()\n",
+        "caj.increment()\n",
+        "apply = jax.jit(caj.apply)\n",
+        "apply(jnp.zeros((3,)))\n",
+        "caj.increment()\n",
+        "caj.increment()\n",
+        "apply(jnp.zeros((3,)))"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "CknB82AjwUro"
+      },
+      "source": [
+        "The apply function returned ones instead of threes, the two last increments were not taken into account. This is because the `caj.apply` function was jitted, and thus anything within this function except from its arguments was considered as static at compile time, and frozen when producing the `jaxpr`. After the jitting pass, `caj.increment` does not affect `apply` `jaxpr`, and thus the result of the computations. Now for some even trickier behavior, can you guess what the following cell prints out?"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "id": "yJkNK4f3w7K1"
+      },
+      "outputs": [],
+      "source": [
+        "caj = CounterAndJax()\n",
+        "caj.increment()\n",
+        "apply = jax.jit(caj.apply)\n",
+        "caj.increment()\n",
+        "apply(jnp.zeros((3,)))\n",
+        "caj.increment()\n",
+        "apply(jnp.zeros((3,)))"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "xI8buolOxANQ"
+      },
+      "source": [
+        "That's a strange one. What you must remember to answer this question properly is that JAX does not jit your function when `jax.jit` is called, but when the resulting function is applied, **because it needs to know the shape of the arguments you are passing in**. In that case, `apply` is jitted when it is called on the first `jnp.zeros((3,))` tensor, after two increments have been done. Let's finish with the trickiest of all, can you guess what the following code will produce?"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "id": "yybLpmSFxwCf"
+      },
+      "outputs": [],
+      "source": [
+        "caj = CounterAndJax()\n",
+        "caj.increment()\n",
+        "apply = jax.jit(caj.apply)\n",
+        "caj.increment()\n",
+        "apply(jnp.zeros((3,)))\n",
+        "caj.increment()\n",
+        "apply(jnp.zeros((4,)))\n",
+        "caj.increment()\n",
+        "apply(jnp.zeros((4,)))"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "0EwHPIKtx1WE"
+      },
+      "source": [
+        "Again, you must predict where the apply function will be jitted for the specific argument shape you are using. In this case, the first call `apply(jnp.zeros((4,)))` is where the function is first jitted for 1D tensors of size 4. This comes after three counter increments, and the last counter increment has not effect.\n",
+        "\n",
+        "As you may notice, predicting JAX's behavior when side effects are involved is extremely complicated (close to impossible in very complex cases). This is the reason why you should try to only use pure functions when you are using JAX."
+      ]
+    }
+  ],
+  "metadata": {
+    "accelerator": "GPU",
+    "colab": {
+      "collapsed_sections": [
+        "a_vbrBxWc8O2",
+        "ErkTGyQ0Qase",
+        "JVaNs4WEQekY",
+        "g1zmS-Km06ci"
+      ],
+      "provenance": []
+    },
+    "kernelspec": {
+      "display_name": "Python 3",
+      "name": "python3"
+    },
+    "language_info": {
+      "name": "python"
+    }
+  },
+  "nbformat": 4,
+  "nbformat_minor": 0
+}

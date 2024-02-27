@@ -1,0 +1,889 @@
+{
+  "nbformat": 4,
+  "nbformat_minor": 0,
+  "metadata": {
+    "colab": {
+      "provenance": []
+    },
+    "kernelspec": {
+      "name": "python3",
+      "display_name": "Python 3"
+    },
+    "language_info": {
+      "name": "python"
+    },
+    "accelerator": "GPU"
+  },
+  "cells": [
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "a_vbrBxWc8O2"
+      },
+      "source": [
+        "# Licence\n"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "WTl-ivwIcS38"
+      },
+      "source": [
+        "#Licence\n",
+        "#Copyright 2021 Google LLC.\n",
+        "#SPDX-License-Identifier: Apache-2.0"
+      ],
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "ErkTGyQ0Qase"
+      },
+      "source": [
+        "#Deep Q-Network\n",
+        "\n",
+        "This practical aims at implementing, from scratch, a working <a href=\"https://arxiv.org/abs/1312.5602\">Deep Q-learning</a> agent on a simple Catch game."
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "JVaNs4WEQekY"
+      },
+      "source": [
+        "##Installation"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "QKP2o0QuQhpd"
+      },
+      "source": [
+        "### Install required libraries\n",
+        "\n",
+        "1. [Acme](https://github.com/deepmind/acme) is a library of reinforcement learning (RL) agents and agent building blocks.\n",
+        "\n",
+        "2. [Haiku](https://github.com/deepmind/dm-haiku) is a neural network library for JAX that we saw in the previous practical.\n",
+        "\n",
+        "3. [dm_env](https://github.com/deepmind/dm_env): DeepMind Environment API, which will be covered in more details in the [Environment subsection](https://colab.research.google.com/drive/1oKyyhOFAFSBTpVnmuOm9HXh5D5ekqhh5#scrollTo=I6KuVGSk4uc9) below.1"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "gDZSbrcjQkJ5",
+        "cellView": "form"
+      },
+      "source": [
+        "#@title Installations  { form-width: \"30%\" }\n",
+        "\n",
+        "%pip install git+https://github.com/deepmind/acme.git#egg=dm-acme[jax,tf,envs]\n",
+        "\n",
+        "from IPython.display import clear_output\n",
+        "clear_output()"
+      ],
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "sBqd3jWPQ6YJ",
+        "cellView": "form"
+      },
+      "source": [
+        "#@title Imports  { form-width: \"30%\" }\n",
+        "\n",
+        "import IPython\n",
+        "\n",
+        "import base64\n",
+        "import chex\n",
+        "import collections\n",
+        "from collections import namedtuple\n",
+        "import dm_env\n",
+        "import enum\n",
+        "import functools\n",
+        "import gym\n",
+        "import haiku as hk\n",
+        "import io\n",
+        "import itertools\n",
+        "import jax\n",
+        "from jax import tree_util\n",
+        "import optax\n",
+        "import jax.numpy as jnp\n",
+        "import matplotlib.pyplot as plt\n",
+        "import numpy as np\n",
+        "import pandas as pd\n",
+        "import random\n",
+        "import reverb\n",
+        "import rlax\n",
+        "import time\n",
+        "from bsuite import environments\n",
+        "import bsuite.environments.catch as dm_catch\n",
+        "\n",
+        "import warnings\n",
+        "\n",
+        "np.set_printoptions(precision=3, suppress=1)\n",
+        "\n",
+        "%matplotlib inline"
+      ],
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "_6WHNe9WQ8-g"
+      },
+      "source": [
+        "# 1. Environment"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "jmhfHAMRRBnJ"
+      },
+      "source": [
+        "We here focus on a very simple environment: Catch!\n",
+        "\n",
+        "The agent must move a paddle to intercept falling balls. Falling balls only\n",
+        "move downwards on the column they are in.\n",
+        "The observation is an array shape (rows, columns), with binary values:\n",
+        "zero if a space is empty; 1 if it contains the paddle or a ball.\n",
+        "The actions are discrete, and by default there are three available:\n",
+        "stay, move left, and move right.\n",
+        "The episode terminates when the ball reaches the bottom of the screen.\n",
+        "\n",
+        "The first thing you are going to do is implement a random policy on this environment, i.e. a policy that returns a uniformly random action, whatever the observation received.\n"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "# @title **[Implement]** Random policy { form-width: \"30%\" }\n",
+        "def random_policy(obs: chex.Array, num_actions: int) -> chex.Array:\n",
+        "  return np.random.randint(num_actions)"
+      ],
+      "metadata": {
+        "id": "FWsjm9xLny5P",
+        "cellView": "form"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "# @title Interacting with the environment.\n",
+        "num_episodes = 1\n",
+        "\n",
+        "environment = dm_catch.Catch(rows=5)\n",
+        "int2action = {0: \"left\", 1: \"none\", 2: \"right\"}\n",
+        "Na = environment.action_spec().num_values\n",
+        "\n",
+        "for episode in range(num_episodes):\n",
+        "\n",
+        "  # Reset any counts and start the environment.\n",
+        "  timestep = environment.reset()\n",
+        "\n",
+        "  # Run an episode.\n",
+        "  while not timestep.last():\n",
+        "\n",
+        "    print(timestep.observation)\n",
+        "\n",
+        "    # Generate an action from the agent's policy and step the environment.\n",
+        "    action = random_policy(timestep.observation, Na)\n",
+        "    timestep = environment.step(action)\n",
+        "    print('')\n",
+        "    print('Action: ', int2action[action])\n",
+        "    print('')\n",
+        "\n",
+        "\n",
+        "print(timestep.observation)\n",
+        "print(\"End of episode\")\n",
+        "print(\"Final reward:\", timestep.reward)"
+      ],
+      "metadata": {
+        "id": "9cjyGYJZo0iC",
+        "cellView": "form"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "# 2. Q-Learning and DQN on catch"
+      ],
+      "metadata": {
+        "id": "iGibh1ow3e7A"
+      }
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "## 2.1. Implementing Q-learning on catch"
+      ],
+      "metadata": {
+        "id": "ZogvM8K9pmmV"
+      }
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "Catch is a finite state, finite action environment, with few state and actions. It is thus possible to directly implement Q-learning on it. This is the first thing we are going to do.\n",
+        "\n",
+        "Contrary to the previous environment we have seen, the environment does not provide a list of all accessible states, and it is thus not possible to fill in all the values of $Q_0(s, a)$ in advance. We are going to fill in our approximate Q-function on the fly. To do this we are going to make use of a dictionary, with keys being pairs of state and actions, and values the corresponding Q-function. Each time we encounter a state action pair that we haven't seen before, we are adding this pair to the dictionary.\n",
+        "\n",
+        "One small difficulty is that a dictionary cannot use a numpy array as a key, and our states are represented as numpy arrays. To circumvent that problem, we provide two function, `np_to_hash`and `hash_to_np`that transform a numpy array state into a tuple."
+      ],
+      "metadata": {
+        "id": "NNyZFt_Bpq9C"
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "# @title **[Read and understand]** State conversions { form-width: \"30%\" }\n",
+        "from typing import *\n",
+        "\n",
+        "def np_to_hash(state: chex.Array) -> Tuple[int, int, int, int]:\n",
+        "  \"\"\"Converts a state to a tuple of int.\n",
+        "\n",
+        "  For instance, the state\n",
+        "  [[1. 0. 0. 0. 0.]\n",
+        "   [0. 0. 0. 0. 0.]\n",
+        "   [0. 0. 0. 0. 0.]\n",
+        "   [0. 0. 0. 0. 0.]\n",
+        "   [0. 0. 1. 0. 0.]]\n",
+        "  is converted to [0, 0, 4, 2], e.g. we are encoding the positions of the\n",
+        "  two only non zero elements in the array.\n",
+        "  \"\"\"\n",
+        "  x, y = np.nonzero(state)\n",
+        "  return (x[0], y[0], x[1], y[1])\n",
+        "\n",
+        "def hash_to_np(hash: Tuple[int, int, int, int], nb_rows: int, nb_cols: int) -> chex.Array:\n",
+        "  \"\"\"Inverse function of np_to_hash.\"\"\"\n",
+        "  state = np.zeros((nb_rows, nb_cols))\n",
+        "  state[hash[0], hash[1]] = 1.\n",
+        "  state[hash[2], hash[3]] = 1.\n",
+        "  return state"
+      ],
+      "metadata": {
+        "cellView": "form",
+        "id": "3FvdHx_lr2U9"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "With those two functions, you should now be able to implement Q-learning on the catch environment. Fill in the `sample_action` and `update` method of the QAgent class, then run this agent on the Catch environment."
+      ],
+      "metadata": {
+        "id": "WfrYbDrd3B9l"
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "# @title **[Implement]** Q-learning { form-width: \"30%\" }\n",
+        "class QAgent:\n",
+        "    \"\"\"Q-learning with epsilon-greedy exploration.\"\"\"\n",
+        "    def __init__(self, env: dm_env.Environment, gamma: float, epsilon: float, alpha: float):\n",
+        "      self.qfunction = {}\n",
+        "      self._env = env\n",
+        "      self._epsilon = epsilon\n",
+        "      self._Na = env.action_spec().num_values\n",
+        "      self._alpha = alpha\n",
+        "      self._gamma = gamma\n",
+        "\n",
+        "\n",
+        "    def sample_action(self, state: chex.Array, greedy: bool = False) -> int:\n",
+        "      # Your code here !\n",
+        "      ...\n",
+        "      return action\n",
+        "\n",
+        "    def update(self, state: chex.Array, action: int, next_state: chex.Array, reward: float, done: bool) -> None:\n",
+        "      # Your code here !"
+      ],
+      "metadata": {
+        "id": "SBTG73AXqCXm"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "# @title Running Q-learning.\n",
+        "import matplotlib.pyplot as plt\n",
+        "\n",
+        "num_episodes = 300\n",
+        "num_eval_episodes = 10\n",
+        "eval_every_N = 5\n",
+        "alpha = .03\n",
+        "epsilon = .3\n",
+        "gamma = .9\n",
+        "\n",
+        "environment = dm_catch.Catch(rows=5)\n",
+        "int2action = {0: \"left\", 1: \"none\", 2: \"right\"}\n",
+        "Na = environment.action_spec().num_values\n",
+        "\n",
+        "agent = QAgent(environment, gamma, epsilon, alpha)\n",
+        "all_rewards = []\n",
+        "episodes = []\n",
+        "\n",
+        "def run_episode(agent: QAgent, env: dm_catch.Catch, eval: bool) -> float:\n",
+        "  # Reset any counts and start the environment.\n",
+        "  timestep = environment.reset()\n",
+        "  state = timestep.observation\n",
+        "\n",
+        "  # Run an episode.\n",
+        "  while not timestep.last():\n",
+        "\n",
+        "    # Generate an action from the agent's policy and step the environment.\n",
+        "    action = agent.sample_action(timestep.observation, greedy=eval)\n",
+        "    timestep = environment.step(action)\n",
+        "    next_state = timestep.observation\n",
+        "    reward = timestep.reward\n",
+        "    done = timestep.last()\n",
+        "    if not eval:\n",
+        "      agent.update(state, action, next_state, reward, done)\n",
+        "    state = next_state\n",
+        "\n",
+        "  return reward\n",
+        "\n",
+        "print(\"Episode number:\\t| Average reward on 100 eval episodes\")\n",
+        "print(\"------------------------------------------------------\")\n",
+        "\n",
+        "for episode in range(num_episodes):\n",
+        "  run_episode(agent, environment, eval=False)\n",
+        "\n",
+        "  if episode % eval_every_N == 0:\n",
+        "    reward = np.mean([run_episode(agent, environment, eval=True) for _ in range(num_eval_episodes)])\n",
+        "    print(f\"\\t{episode}\\t|\\t{reward}\")\n",
+        "    all_rewards.append(reward)\n",
+        "    episodes.append(episode)\n",
+        "\n",
+        "plt.xlabel('Number of training episodes')\n",
+        "plt.ylabel('Average return')\n",
+        "plt.plot(episodes, all_rewards)"
+      ],
+      "metadata": {
+        "id": "aYwpMWQqxxmk",
+        "cellView": "form"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "## 2.2. Deep Q-Learning on Catch"
+      ],
+      "metadata": {
+        "id": "QPmj7cfZ5Ych"
+      }
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "Now that we have a working version of Q-Learning on Catch, we are going to try to implement Deep Q-Learning on this same environment. To that end, we need mostly need three core components:\n",
+        " - a function approximator (here, a neural network),\n",
+        " - a replay buffer,\n",
+        " - a target network.\n",
+        "\n",
+        "Those thee components are then put together into a training loop"
+      ],
+      "metadata": {
+        "id": "ESaSQvhl5fBV"
+      }
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "gAtlEEWqSlq5"
+      },
+      "source": [
+        "### 2.2.1. Implementing a uniform replay buffer"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "As a first step, let's implement a _uniform replay buffer_.\n",
+        "A replay buffer stores transitions from the environment, i.e. when the agent interacts with the environment and produces trajectories\n",
+        "\n",
+        "$$(s_0, a_0, r_0, \\mathrm{done}_0, s_1, a_1, r_1, \\mathrm{done}_1, \\ldots),$$\n",
+        "\n",
+        "the replay buffer will be used to store a maximum of $N$ _transitions_ from the trajectories, i.e. t-tuples of the form\n",
+        "$$(s_t, a_t, r_t, \\mathrm{done}_t, s_{t+1})\\cdot$$\n",
+        "From those transitions, the replay buffer will allow us to randomly sample individual or batches of transitions. Without a replay buffer, when training our agents, we would always use consecutive transitions coming from the trajectory. Those transitions are extremely correlated, and neural networks trained with gradient descent tend to not play well with very correlated samples. The replay buffer is one of the core component that allow DQN to scale up to complex environment.\n",
+        "\n",
+        "Your goal is thus to implement a class ReplayBuffer that store transitions from trajectories and resample them a posteriori. Your replay buffer must have the following properties:\n",
+        " - A limited capacity to store $\\kappa$ tuples.\n",
+        " - when a tuple is added, if there is no space left in memory, it replaces the oldest tuple in the replay buffer.\n",
+        "\n",
+        "\n"
+      ],
+      "metadata": {
+        "id": "8XKlKSbmBInD"
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "#@title **[Implement]** Uniform Replay Buffer { form-width: \"30%\" }\n",
+        "\n",
+        "import dataclasses\n",
+        "\n",
+        "@chex.dataclass\n",
+        "class Transition:\n",
+        "  state_t: chex.Array\n",
+        "  action_t: chex.Array\n",
+        "  reward_t: chex.Array\n",
+        "  done_t: chex.Array\n",
+        "  state_tp1: chex.Array\n",
+        "\n",
+        "\n",
+        "class ReplayBuffer:\n",
+        "  \"\"\"Fixed-size buffer to store transition tuples.\"\"\"\n",
+        "\n",
+        "  def __init__(self, buffer_capacity: int):\n",
+        "      \"\"\"Initialize a ReplayBuffer object.\n",
+        "      Args:\n",
+        "          batch_size (int): size of each training batch\n",
+        "      \"\"\"\n",
+        "      self._memory = list()\n",
+        "      self._maxlen = buffer_capacity\n",
+        "\n",
+        "  @property\n",
+        "  def size(self) -> int:\n",
+        "    # Return the current number of elements in the buffer.\n",
+        "    return ...\n",
+        "\n",
+        "  def add(self, state_t: chex.Array,\n",
+        "          action_t: chex.Array,\n",
+        "          reward_t: chex.Array,\n",
+        "          done_t: chex.Array,\n",
+        "          state_tp1: chex.Array) -> None:\n",
+        "      \"\"\"Add a new transition to memory.\"\"\"\n",
+        "      # Your code here !\n",
+        "      ...\n",
+        "\n",
+        "  def sample(self) -> Transition:\n",
+        "      \"\"\"Randomly sample a transition from memory.\"\"\"\n",
+        "      assert self._memory, 'replay buffer is unfilled'\n",
+        "      # Your code here !\n",
+        "      return ...\n"
+      ],
+      "metadata": {
+        "id": "FoYvBLMaMF7s",
+        "cellView": "form"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "Let's now try to add an new method to sample batches of transitions."
+      ],
+      "metadata": {
+        "id": "Rb4C6yIwwr0U"
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "#@title **[Implement]** Uniform Replay Buffer with Batch{ form-width: \"30%\" }\n",
+        "\n",
+        "class BatchedReplayBuffer(ReplayBuffer):\n",
+        "\n",
+        "  def sample_batch(self, batch_size) -> Transition:\n",
+        "    \"\"\"Randomly sample a batch of experiences from memory.\"\"\"\n",
+        "    assert len(self._memory) >= batch_size, 'Insuficient number of transitions in replay buffer'\n",
+        "    # Your code here !\n",
+        "    return ..."
+      ],
+      "metadata": {
+        "id": "GIPW1BmmaP1P"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "# @title Test the replay buffer\n",
+        "env = dm_catch.Catch(rows=5)\n",
+        "batch_size = 32\n",
+        "buffer = BatchedReplayBuffer(100)\n",
+        "for _ in range(50):\n",
+        "  ts = env.reset()\n",
+        "\n",
+        "  buffer.add(ts.observation, 1, ts.reward or 0., ts.last(), ts.observation)\n",
+        "\n",
+        "assert buffer.sample_batch(32).state_t.shape[0] == 32"
+      ],
+      "metadata": {
+        "id": "vwLYRgo8oNJc",
+        "cellView": "form"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "hHPOBsmvBTKz"
+      },
+      "source": [
+        "# 4. Implementing DQN"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "AO5NSfxvBW2N"
+      },
+      "source": [
+        "We are now ready to get to the DQN implementation. First, let's define the network. Catch is a small environment, whose inputs are spatial dimension Row * Column * 1, with 0/1 inputs. What could be a good network to handle this environment? Remember that when you approximate a Q-function, the Q network should take in an action, and output as many values as there are available actions.\n"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "#@title **[Implement]** Catch Network { form-width: \"30%\" }\n",
+        "def catch_network(x: chex.Array, env: dm_catch.Catch):\n",
+        "  # Your code here !\n",
+        "  return ..."
+      ],
+      "metadata": {
+        "id": "KxfddPfnQBSU"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "Next, we will define all the parts of our agent in the `DQNAgent` class below.\n",
+        "\n",
+        "1. Let us first define a function to initialize the parameters of our online network, our target network, and our optimizer state in the let's define the Q-function loss. Fill in the `_init_state` function below.\n",
+        "\n",
+        "2. Second, fill in the `act` method, that outputs an action selected using an $\\varepsilon$ policy using the current estimate of the Q-function.\n",
+        "\n",
+        "3. Third, implement the `loss_fn` method. To that end, remember that the DQN loss function can be written as\n",
+        "$$L_i (\\theta_i) = \\mathbb{E}_{\\color{red}{s},\\color{blue}{a} \\sim \\rho(\\cdot)} \\left[ \\left( y_i - Q(\\color{red}{s},\\color{blue}{a} ;\\theta_i) \\right)^2\\right]$$\n",
+        "where the target $y_i$ is computed using a bootstrap value computed from Q-value network with target parameters:\n",
+        "$$ y_i = \\mathbb{E}_{\\color{red}{s'} \\sim \\mathcal{E}} \\left[ \\color{green}{r} + \\gamma \\max_{\\color{blue}{a'} \\in \\color{blue}{\\mathcal{A}}} Q(\\color{red}{s'}, \\color{blue}{a'} ; \\theta^{\\text{target}}_i) \\; | \\; \\color{red}{s}, \\color{blue}{a} \\right] $$\n",
+        "Some hints to implement this loss function:\n",
+        " - Do not forget to *not* bootstrap the final Q-value!\n",
+        " - The inputs are batched, so you will need batched indexing, i.e. accessing the Q-function of a certain action for each element in your batch of actions.\n",
+        "4. Finally implement the `_update_fn`. This function first computes the gradient of your loss function at the current batch, then passes this gradient to an optimizer (here Adam) to get an update. Finally you need to apply this update to the current parameters. This is done using the `optax` package, and you can find an example on how to use it on this [github page](https://github.com/deepmind/optax/blob/master/README.md) and in this [colab](https://github.com/deepmind/optax/blob/master/examples/quick_start.ipynb).\n",
+        "\n",
+        "Once all these steps are completed, you can test your agent on the catch environment below. You can also use the cell right after the definition of your agent for debug purposes.\n"
+      ],
+      "metadata": {
+        "id": "d7oStESGQP4E"
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "# A convenient way to pack together all the variables we need when updating\n",
+        "# the agent.\n",
+        "@chex.dataclass\n",
+        "class LearnerState:\n",
+        "  online_params: hk.Params\n",
+        "  target_params: hk.Params\n",
+        "  opt_state: optax.OptState\n",
+        "\n",
+        "class DQNAgent:\n",
+        "\n",
+        "  def __init__(\n",
+        "      self,\n",
+        "      env: dm_catch.Catch,\n",
+        "      gamma: float,\n",
+        "      eps: float,\n",
+        "      learning_rate: float,\n",
+        "      buffer_capacity: int,\n",
+        "      min_buffer_capacity: int,\n",
+        "      batch_size: int,\n",
+        "      target_ema: float,\n",
+        "      seed: int = 0,\n",
+        "      ) -> None:\n",
+        "    \"\"\"Initializes the DQN agent.\n",
+        "\n",
+        "    Args:\n",
+        "      env: input catch environment.\n",
+        "      gamma: discount factor\n",
+        "      eps: probability to perform a random exploration when picking a new action.\n",
+        "      learning_rate: learning rate of the online network\n",
+        "      buffer_capacity: capacity of the replay buffer\n",
+        "      min_buffer_capacity: min buffer size before picking batches from the\n",
+        "        replay buffer to update the online network\n",
+        "      batch_size: batch size when updating the online network\n",
+        "      target_ema: weight when updating the target network.\n",
+        "      seed: seed of the random generator.\n",
+        "    \"\"\"\n",
+        "    self._env = env\n",
+        "    self._learning_rate = learning_rate\n",
+        "    self._eps = eps\n",
+        "    self._gamma = gamma\n",
+        "    self._batch_size = batch_size\n",
+        "    self._target_ema = target_ema\n",
+        "    self._Na = env.action_spec().num_values\n",
+        "\n",
+        "    # Define the neural network for this agent\n",
+        "    self._init, self._apply = hk.without_apply_rng(hk.transform(self._hk_qfunction))\n",
+        "    # Jit the forward pass of the neural network for better performances\n",
+        "    self.apply = jax.jit(self._apply)\n",
+        "\n",
+        "    # Also jit the update functiom\n",
+        "    self._update_fn = jax.jit(self._update_fn)\n",
+        "\n",
+        "    # Initialize the network's parameters\n",
+        "    self._rng = jax.random.PRNGKey(seed)\n",
+        "    self._rng, init_rng = jax.random.split(self._rng)\n",
+        "    self._learner_state = self._init_state(init_rng)\n",
+        "\n",
+        "    # Initialize the replay buffer\n",
+        "    self._min_buffer_capacity = min_buffer_capacity\n",
+        "    self._buffer = BatchedReplayBuffer(buffer_capacity)\n",
+        "\n",
+        "    # Build a variable to store the last state observed by the agent\n",
+        "    self._state = None\n",
+        "\n",
+        "  def _optimizer(self) -> optax.GradientTransformation:\n",
+        "    return optax.adam(learning_rate=self._learning_rate)\n",
+        "\n",
+        "  def _hk_qfunction(self, state: chex.Array) -> chex.Array:\n",
+        "    return catch_network(state, self._env)\n",
+        "\n",
+        "  def first_observe(self, state: chex.Array) -> None:\n",
+        "    self._state = state\n",
+        "\n",
+        "  def _init_state(self, rng: chex.PRNGKey) -> LearnerState:\n",
+        "    \"\"\"Initialize the online parameters, the target parameters and the\n",
+        "    optimizer's state.\"\"\"\n",
+        "    # Your code here !\n",
+        "\n",
+        "    return ...\n",
+        "\n",
+        "  def act(self,\n",
+        "          state: chex.Array,\n",
+        "          eval: bool,\n",
+        "          ) -> chex.Array:\n",
+        "    \"\"\"Picks the next action using an epsilon greedy policy.\n",
+        "\n",
+        "    Args:\n",
+        "      state: observed state.\n",
+        "      eval: if True the agent is acting in evaluation mode (which means it only\n",
+        "        acts according to the best policy it knows.)\n",
+        "    \"\"\"\n",
+        "    # Fill in this function to act using an epsilon-greedy policy.\n",
+        "    ...\n",
+        "    return ...\n",
+        "\n",
+        "  def loss_fn(\n",
+        "      self,\n",
+        "      online_params: hk.Params,\n",
+        "      target_params: hk.Params,\n",
+        "      state_t: chex.Array,\n",
+        "      action_t: chex.Array,\n",
+        "      reward_t: chex.Array,\n",
+        "      done_t: chex.Array,\n",
+        "      state_tp1: chex.Array,\n",
+        "      ) -> chex.Array:\n",
+        "      \"\"\"Computes the Q-learning loss\n",
+        "\n",
+        "      Args:\n",
+        "        online_params: parameters of the online network\n",
+        "        target_params: parameters of the target network\n",
+        "        state_t: batch of observations at time t\n",
+        "        action_t: batch of actions performed at time t\n",
+        "        reward_t: batch of rewards obtained at time t\n",
+        "        done_t: batch of end of episode status at time t\n",
+        "        state_tp1: batch of states at time t+1\n",
+        "      Returns:\n",
+        "        The Q-learning loss.\n",
+        "      \"\"\"\n",
+        "      # Your code here !\n",
+        "      ...\n",
+        "\n",
+        "      return loss\n",
+        "\n",
+        "  def _update_fn(self,\n",
+        "                 state: LearnerState,\n",
+        "                 batch: Transition,\n",
+        "                 ) -> Tuple[chex.Array, LearnerState]:\n",
+        "    \"\"\"Get the next learner state given the current batch of transitions.\n",
+        "\n",
+        "    Args:\n",
+        "      state: learner state before update.\n",
+        "      batch: batch of experiences (st, at, rt, done_t, stp1)\n",
+        "    Returns:\n",
+        "      loss, learner state after update\n",
+        "    \"\"\"\n",
+        "\n",
+        "    # Compute gradients\n",
+        "    ...\n",
+        "\n",
+        "    # Apply gradients\n",
+        "    ...\n",
+        "\n",
+        "    # Update target network params as:\n",
+        "    # target_params <- ema * target_params + (1 - ema) * online_params\n",
+        "    ...\n",
+        "\n",
+        "    return loss, next_state\n",
+        "\n",
+        "  def observe(self,\n",
+        "              action_t: chex.Array,\n",
+        "              reward_t: chex.Array,\n",
+        "              done_t: chex.Array,\n",
+        "              state_tp1: chex.Array,\n",
+        "              ) -> chex.Array:\n",
+        "    \"\"\"Updates the agent from the given observations.\n",
+        "\n",
+        "    Args:\n",
+        "      action_t: action performed at time t.\n",
+        "      reward_t: reward obtained after having performed action_t.\n",
+        "      done_t: whether or not the episode is over after performing action_t.\n",
+        "      state_tp1: state at which the environment is at time t+1.\n",
+        "    Returns:\n",
+        "      DQN loss obtained when updating the online network.\n",
+        "    \"\"\"\n",
+        "    self._buffer.add(self._state, action_t, reward_t, done_t, state_tp1)\n",
+        "    self._state = state_tp1\n",
+        "\n",
+        "    # We update the agent if and only if we have enought state stored in\n",
+        "    # memory.\n",
+        "    if self._buffer.size() >= self._min_buffer_capacity:\n",
+        "      batch = self._buffer.sample_batch(self._batch_size)\n",
+        "      loss, self._learner_state = self._update_fn(self._learner_state, batch)\n",
+        "      return loss\n",
+        "    return 0."
+      ],
+      "metadata": {
+        "id": "pqMM8K5qTAEj"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "# You can use this cell to test the implementation of the subparts of your agent\n",
+        "# For instance, you can have a look at the _learner_state of your agent, or try\n",
+        "# to compute the loss on a transition, ...\n",
+        "dqn_agent = DQNAgent(\n",
+        "    env=env,\n",
+        "    gamma=.9,\n",
+        "    eps=.3,\n",
+        "    learning_rate=3e-4,\n",
+        "    buffer_capacity=1000,\n",
+        "    min_buffer_capacity=32,\n",
+        "    batch_size=32,\n",
+        "    target_ema=.9,\n",
+        ")\n",
+        "jax.tree_map(lambda x: x.shape, dqn_agent._learner_state)"
+      ],
+      "metadata": {
+        "id": "QGguc-ynVGa_"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "#@title Running Deep Q-Learning { form-width: \"30%\" }\n",
+        "\n",
+        "num_episodes = 1000\n",
+        "num_eval_episodes = 10\n",
+        "eval_every_N = 10\n",
+        "\n",
+        "env = dm_catch.Catch(rows=5)\n",
+        "dqn_agent = DQNAgent(\n",
+        "    env=env,\n",
+        "    gamma=.9,\n",
+        "    eps=.3,\n",
+        "    learning_rate=3e-4,\n",
+        "    buffer_capacity=1000,\n",
+        "    min_buffer_capacity=32,\n",
+        "    batch_size=32,\n",
+        "    target_ema=.9,\n",
+        ")\n",
+        "\n",
+        "def run_dqn_episode(dqn_agent: DQNAgent,\n",
+        "                    env: dm_catch.Catch,\n",
+        "                    eval: bool,\n",
+        "                    ) -> float:\n",
+        "  \"\"\"Runs a single episode of catch.\n",
+        "\n",
+        "  Args:\n",
+        "    dqn_agent: agent to train or evaluate\n",
+        "    env: input catch environment.\n",
+        "    eval: evaluation mode.\n",
+        "  Returns:\n",
+        "    total reward accumulated over the episode.\n",
+        "  \"\"\"\n",
+        "  # Reset any counts and start the environment.\n",
+        "  timestep = environment.reset()\n",
+        "  dqn_agent.first_observe(timestep.observation)\n",
+        "  total_reward = 0\n",
+        "\n",
+        "  # Run an episode.\n",
+        "  while not timestep.last():\n",
+        "\n",
+        "    # Generate an action from the agent's policy and step the environment.\n",
+        "    action = dqn_agent.act(timestep.observation, eval)\n",
+        "    timestep = environment.step(action)\n",
+        "    next_state = timestep.observation\n",
+        "    reward = timestep.reward\n",
+        "    done = timestep.last()\n",
+        "    if not eval:\n",
+        "      dqn_agent.observe(action, reward, done, next_state)\n",
+        "\n",
+        "    total_reward += reward\n",
+        "\n",
+        "  return total_reward\n",
+        "\n",
+        "\n",
+        "print(\"Episode number:\\t| Average reward on 100 eval episodes\")\n",
+        "print(\"------------------------------------------------------\")\n",
+        "\n",
+        "episodes = []\n",
+        "all_rewards = []\n",
+        "for episode in range(num_episodes):\n",
+        "  run_dqn_episode(dqn_agent, environment, eval=False)\n",
+        "\n",
+        "  if episode % eval_every_N == 0:\n",
+        "    reward = np.mean([run_dqn_episode(dqn_agent, environment, eval=True) for _ in range(num_eval_episodes)])\n",
+        "    print(f\"\\t{episode}\\t|\\t{reward}\")\n",
+        "    all_rewards.append(reward)\n",
+        "    episodes.append(episode)\n",
+        "\n",
+        "plt.xlabel('Number of training episodes')\n",
+        "plt.ylabel('Average return')\n",
+        "plt.plot(episodes, all_rewards)"
+      ],
+      "metadata": {
+        "id": "LGnyMIUpFEeC"
+      },
+      "execution_count": null,
+      "outputs": []
+    }
+  ]
+}
+
